@@ -50,7 +50,7 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
         location = _finding_location(finding)
         cells = (
             finding["severity"],
-            finding["rule"],
+            finding["rule_id"],
             location,
             finding["title"],
             finding["confidence"],
@@ -64,7 +64,7 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
             [
                 f"### {index}. [{finding['severity']}] {finding['title']}",
                 "",
-                f"- Rule: `{finding['rule']}`",
+                f"- Rule: `{finding['rule_id']}`",
                 f"- Location: `{location}`",
                 f"- Confidence: {finding['confidence']}",
                 f"- Evidence: {_markdown_cell(finding['evidence'])}",
@@ -80,9 +80,9 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
 
 
 def _finding_location(finding: dict[str, Any]) -> str:
-    location = str(finding["file"])
-    if finding["line"] is not None:
-        location += f":{finding['line']}"
+    location = str(finding["path"])
+    if finding.get("line_start") is not None:
+        location += f":{finding['line_start']}"
     return location
 
 
@@ -91,21 +91,23 @@ def _markdown_cell(value: object) -> str:
 
 
 def _fingerprint(finding: dict[str, Any]) -> str:
-    identity = "|".join(str(finding.get(key)) for key in ("rule", "file", "line", "title"))
+    identity = "|".join(
+        str(finding.get(key)) for key in ("rule_id", "path", "side", "line_start", "title")
+    )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
 def _finding_v3(finding: dict[str, Any]) -> dict[str, Any]:
     return {
-        "rule_id": finding["rule"],
-        "severity": finding["severity"],
-        "requires_human_classification": False,
+        "rule_id": finding["rule_id"],
+        "severity": finding.get("severity"),
+        "requires_human_classification": finding.get("requires_human_classification", False),
         "confidence": finding["confidence"],
         "evidence_verified": finding.get("evidence_verified", False),
-        "path": finding["file"],
-        "side": "new",
-        "line_start": finding["line"],
-        "line_end": finding["line"],
+        "path": finding["path"],
+        "side": finding.get("side"),
+        "line_start": finding.get("line_start"),
+        "line_end": finding.get("line_end"),
         "title": finding["title"],
         "evidence": finding["evidence"],
         "explanation": finding["explanation"],

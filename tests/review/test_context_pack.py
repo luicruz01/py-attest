@@ -2,9 +2,43 @@ from pathlib import Path
 
 import pytest
 
+from py_attest.review import context_pack as context_pack_module
 from py_attest.review.context_pack import ContextPackError, build_context
+from py_attest.standards.registry import load_registry
+
+DEFAULTS = Path(__file__).parents[2] / "py_attest" / "standards" / "defaults"
 
 CONTEXT_FILES = ("TEAM-STANDARDS.md", "app/models.py", "app/privacy.py")
+
+
+def test_render_rules_block_lists_llm_mode_rules_with_evidence_and_non_examples() -> None:
+    registry = load_registry(DEFAULTS / "core.standards.yml", DEFAULTS / "domain.standards.yml")
+
+    block = context_pack_module.render_rules_block(registry.llm_rules())
+
+    assert "code-quality-3" in block
+    assert "Validate all external input" in block
+    assert "Require a changed input boundary" in block  # evidence_required
+    assert "Typed FastAPI parameters" in block  # non_examples
+    assert "code-quality-1" not in block  # deterministic rule, excluded
+
+
+def test_build_context_includes_the_rules_block_when_given(tmp_path: Path) -> None:
+    diff = "diff --git a/app/main.py b/app/main.py\n+changed\n"
+
+    context = build_context(
+        diff, tmp_path, rules_block="<review-rules>\nfake rule text\n</review-rules>\n"
+    )
+
+    assert "<review-rules>" in context
+    assert "fake rule text" in context
+    assert context.index("<review-rules>") < context.index("<unified-diff>")
+
+
+def test_build_context_omits_the_rules_block_when_not_given(tmp_path: Path) -> None:
+    context = build_context("diff --git a/f b/f\n+x\n", tmp_path)
+
+    assert "<review-rules>" not in context
 
 
 def write_context_files(root: Path) -> None:

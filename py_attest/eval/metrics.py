@@ -9,7 +9,10 @@ finding, matching the schema_version 3 report shape (TRD SS4.3).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 class EvaluationError(ValueError):
@@ -120,3 +123,92 @@ def _first_match(expected: dict[str, Any], predicted: list[dict[str, Any]]) -> i
 
 def _ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+def severity_exact_results(strict: FindingResults) -> FindingResults:
+    """Seed B's SCORING-POLICY.md "Severity treatment": a strict match with unequal
+    severity is one FN (expected severity) + one FP (predicted severity), never a
+    hidden TP. Unmatched findings carry over unchanged."""
+    true_positives: list[FindingMatch] = []
+    false_negatives: list[FindingRecord] = list(strict.false_negatives)
+    false_positives: list[FindingRecord] = list(strict.false_positives)
+
+    for match in strict.true_positives:
+        if match.expected.finding.get("severity") == match.predicted.finding.get("severity"):
+            true_positives.append(match)
+        else:
+            false_negatives.append(match.expected)
+            false_positives.append(match.predicted)
+
+    return FindingResults(
+        true_positives=true_positives,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+    )
+
+
+def load_adjudications(path: Path) -> list[dict[str, Any]]:
+    """Load eval/golden/adjudications.yml. Missing file -> no adjudications (the
+    mechanism must work before any entry is ever added)."""
+    if not path.is_file():
+        return []
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    entries = document.get("adjudications", [])
+    if not isinstance(entries, list):
+        raise EvaluationError(f"{path}: 'adjudications' must be a list")
+    return entries
+
+
+def apply_adjudications(
+    branch: str,
+    strict: FindingResults,
+    predicted: list[dict[str, Any]],  # noqa: ARG001
+    adjudications: list[dict[str, Any]],
+) -> FindingResults:
+    """Credit documented mismatches (spec SS5) as matches, without mutating `strict`.
+
+    ``predicted`` is accepted for interface stability (Task 5's evaluate() calls
+    all three readings with the same per-branch argument shape) but not used here:
+    the strict match's own false_positive/false_negative records already carry the
+    finding data needed to locate and re-pair a documented mismatch.
+    """
+    true_positives = list(strict.true_positives)
+    remaining_fn = list(strict.false_negatives)
+    remaining_fp = list(strict.false_positives)
+
+    for entry in adjudications:
+        if entry.get("branch") != branch:
+            continue
+        expected_key = entry["expected"]
+        predicted_key = entry["predicted"]
+
+        fn_index = next(
+            (
+                i
+                for i, record in enumerate(remaining_fn)
+                if record.finding.get("rule_id") == expected_key["rule_id"]
+                and record.finding.get("path") == expected_key["path"]
+            ),
+            None,
+        )
+        fp_index = next(
+            (
+                i
+                for i, record in enumerate(remaining_fp)
+                if record.finding.get("rule_id") == predicted_key["rule_id"]
+                and record.finding.get("path") == predicted_key["path"]
+            ),
+            None,
+        )
+        if fn_index is None or fp_index is None:
+            continue  # the documented mismatch didn't recur in this run -- not an error
+
+        expected_record = remaining_fn.pop(fn_index)
+        predicted_record = remaining_fp.pop(fp_index)
+        true_positives.append(FindingMatch(expected_record, predicted_record))
+
+    return FindingResults(
+        true_positives=true_positives,
+        false_positives=remaining_fp,
+        false_negatives=remaining_fn,
+    )

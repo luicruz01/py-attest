@@ -1,0 +1,17 @@
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..bd179adf47af99188e482b42ded060b05d14c26a 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -54,5 +54,12 @@ def record_progress(student_id: str, payload: dict):
+         score=int(payload.get("score", 0)),
+     )
+     store.PROGRESS.append(record)
++    logger.info(
++        "sync: progress recorded for %s (%s) lesson=%s score=%s",
++        student.full_name,
++        student.email,
++        record.lesson_id,
++        record.score,
++    )
+     logger.info("progress recorded %s", redact({"student_id": student.id, "lesson_id": record.lesson_id}))
+     return {"ok": True}

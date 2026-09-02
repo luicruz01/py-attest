@@ -1,0 +1,19 @@
+diff --git a/app/notifications.py b/app/notifications.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1222139665ef8613bbf5534a9bab7ecb548f2f47
+--- /dev/null
++++ b/app/notifications.py
+@@ -0,0 +1,13 @@
++"""Recordatorios por email para estudiantes inactivos (scaffolding, aun sin wire-up)."""
++import logging
++
++logger = logging.getLogger("student-progress.notifications")
++
++# TODO: mover a config antes del launch
++SENDGRID_API_KEY = "SG.kx9mPqT4RhaW2nZvBcYdEg.7JfLs3uNo8QwXeKtViMbAyD1cH5rGpZjUmS0aTnRq6wE"
++FROM_ADDRESS = "reminders@openenglish.com"
++
++
++def send_inactivity_reminder(email: str, days_inactive: int) -> None:
++    """Envia recordatorio via SendGrid. Por ahora solo lo simula."""
++    logger.info("reminder queued to=%s days_inactive=%s", email, days_inactive)

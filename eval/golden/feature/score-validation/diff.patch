@@ -1,0 +1,48 @@
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..8d564e9eb84ead82383f39cbcf32215d3df61bbe 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -47,11 +47,16 @@ def get_progress(student_id: str):
+ @app.post("/students/{student_id}/progress")
+ def record_progress(student_id: str, payload: dict):
+     student = _get_student(student_id)
++    if payload.get("lesson_id") not in {lesson.id for lesson in store.LESSONS}:
++        raise HTTPException(status_code=422, detail="unknown lesson")
++    score = int(payload.get("score", 0))
++    if score < 0 or score > 100:
++        raise HTTPException(status_code=422, detail="score must be between 0 and 100")
+     record = ProgressRecord(
+         student_id=student.id,
+         lesson_id=payload["lesson_id"],
+         completed=True,
+-        score=int(payload.get("score", 0)),
++        score=score,
+     )
+     store.PROGRESS.append(record)
+     logger.info("progress recorded %s", redact({"student_id": student.id, "lesson_id": record.lesson_id}))
+diff --git a/tests/test_score_validation.py b/tests/test_score_validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..238fdde00d673d3ff0751842bb153b464f89de50
+--- /dev/null
++++ b/tests/test_score_validation.py
+@@ -0,0 +1,20 @@
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++client = TestClient(app)
++
++
++def test_unknown_lesson_rejected():
++    resp = client.post("/students/s-004/progress", json={"lesson_id": "l-99", "score": 50})
++    assert resp.status_code == 422
++
++
++def test_out_of_range_score_rejected():
++    assert client.post("/students/s-004/progress", json={"lesson_id": "l-01", "score": 101}).status_code == 422
++    assert client.post("/students/s-004/progress", json={"lesson_id": "l-01", "score": -5}).status_code == 422
++
++
++def test_valid_score_accepted():
++    resp = client.post("/students/s-004/progress", json={"lesson_id": "l-02", "score": 100})
++    assert resp.json() == {"ok": True}

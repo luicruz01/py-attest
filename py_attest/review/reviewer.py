@@ -242,13 +242,13 @@ def run_review(
 def _blocked_review(
     secret_findings: list[dict[str, Any]], *, note: str, anchor_to_diff: bool
 ) -> dict[str, Any]:
-    """Build the review dict for a firewall-blocked run, bypassing postfilter entirely.
+    """Build the review dict for a firewall-blocked run, bypassing validation entirely.
 
-    `postfilter.filter_findings` degrades a finding's confidence when its evidence can't
-    be re-anchored to an added diff line -- correct for model output, wrong here: gitleaks
-    findings are deterministic ground truth, and a real secret must always BLOCK, never
-    quietly soften to a low-confidence COMMENT because it came from a context file or
-    --description rather than the diff itself.
+    `review/validation.py`'s `degrade`/`fail_closed` policy exists to handle *untrusted*
+    LLM-origin findings whose rule_id/location can't be verified -- correct for model
+    output, wrong here: gitleaks findings are deterministic ground truth, and a real
+    secret must always BLOCK, never quietly degrade (or, under fail_closed, be discarded)
+    the way an unverifiable LLM finding would be.
 
     `anchor_to_diff=False` means the findings came from scanning the assembled context
     (context_files/--description), not `diff` -- `findings_for_diff`'s file:line

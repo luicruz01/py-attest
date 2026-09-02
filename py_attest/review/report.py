@@ -9,9 +9,14 @@ from py_attest.review.policy import verdict
 
 
 def render_markdown(source_name: str, review: dict[str, Any]) -> str:
-    """Render a report using the deterministic verdict derived from its findings."""
+    """Render a report using the already-authoritative verdict `reviewer.py` set on
+    `review["verdict"]` before calling this function -- never recompute it here. A
+    fail_closed-invalidated review has empty `findings` with `verdict == "INCONCLUSIVE"`;
+    recomputing via `verdict(findings)` would silently default that to APPROVE (CLAUDE.md:
+    "an incomplete review is ... never an approval").
+    """
     findings = review["findings"]
-    verdict_name, _exit_code = verdict(findings)
+    verdict_name = review["verdict"]
     meta = review["meta"]
     provenance = (
         f"Reviewed with prompt {meta['prompt_version']} · {meta['model']} · "
@@ -23,7 +28,14 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
         lines.extend([f"> **{note}**", ""])
 
     if not findings:
-        lines.extend(["> **APPROVED — no findings**", "", "## Summary", "", review["summary"]])
+        if verdict_name == "APPROVE":
+            lines.extend(["> **APPROVED — no findings**", "", "## Summary", "", review["summary"]])
+        else:
+            # e.g. INCONCLUSIVE with a fail_closed-invalidated response: no findings
+            # survive, but that must never be reported as an approval.
+            lines.extend(
+                [f"> **VERDICT: {verdict_name}**", "", "## Summary", "", review["summary"]]
+            )
         return "\n".join(lines).rstrip() + "\n"
 
     lines.extend([f"> **VERDICT: {verdict_name}**", ""])
@@ -49,7 +61,7 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
     for finding in findings:
         location = _finding_location(finding)
         cells = (
-            finding["severity"],
+            _severity_label(finding),
             finding["rule_id"],
             location,
             finding["title"],
@@ -62,13 +74,25 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
         location = _finding_location(finding)
         lines.extend(
             [
-                f"### {index}. [{finding['severity']}] {finding['title']}",
+                f"### {index}. [{_severity_label(finding)}] {finding['title']}",
                 "",
                 f"- Rule: `{finding['rule_id']}`",
                 f"- Location: `{location}`",
                 f"- Confidence: {finding['confidence']}",
                 f"- Evidence: {_markdown_cell(finding['evidence'])}",
                 "",
+            ]
+        )
+        if finding.get("requires_human_classification"):
+            lines.extend(
+                [
+                    "> **HUMAN REVIEW REQUESTED:** human severity classification required "
+                    "(contextual rule); merge is not blocked.",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
                 finding["explanation"],
                 "",
                 f"Suggested fix: {finding['suggested_fix']}",
@@ -77,6 +101,14 @@ def render_markdown(source_name: str, review: dict[str, Any]) -> str:
         )
     lines.extend(["## Summary", "", review["summary"]])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _severity_label(finding: dict[str, Any]) -> str:
+    """Contextual findings (`requires_human_classification=True`) carry `severity=None`
+    until a human classifies them -- render "contextual", not the literal string "None"
+    (matches `standards/build.py`'s `{{ rule.severity or "contextual" }}` convention).
+    """
+    return finding["severity"] or "contextual"
 
 
 def _finding_location(finding: dict[str, Any]) -> str:

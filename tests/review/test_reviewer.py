@@ -42,6 +42,7 @@ def test_markdown_explicitly_approves_zero_findings() -> None:
             "findings": [],
             "summary": "No standards violations found.",
             "filtered_out": [],
+            "verdict": "APPROVE",
             "meta": {
                 "prompt_version": "v3",
                 "model": "gpt-5-mini",
@@ -56,6 +57,35 @@ def test_markdown_explicitly_approves_zero_findings() -> None:
     )
     assert "APPROVED — no findings" in markdown
     assert "No standards violations found." in markdown
+
+
+def test_markdown_renders_contextual_severity_not_the_literal_none() -> None:
+    contextual_finding = {
+        **finding(rule_id="retention-1", confidence="high"),
+        "severity": None,
+        "requires_human_classification": True,
+    }
+
+    markdown = render_markdown(
+        "feature/sound-change",
+        {
+            "findings": [contextual_finding],
+            "summary": "One contextual finding.",
+            "filtered_out": [],
+            "verdict": "COMMENT",
+            "meta": {
+                "prompt_version": "v3",
+                "model": "gpt-5-mini",
+                "temperature": "model-default",
+                "gate_commit": "c8ca0e9",
+            },
+        },
+    )
+
+    assert "[None]" not in markdown
+    assert "| None |" not in markdown
+    assert "[contextual]" in markdown
+    assert "human severity classification required" in markdown
 
 
 @pytest.mark.parametrize(
@@ -366,6 +396,47 @@ def test_run_review_fail_closed_invalidates_the_response_on_an_invalid_finding(
     assert outcome.json_report["findings"] == []
     assert "fail_closed" in outcome.json_report["note"]
     assert "1 of 1" in outcome.json_report["note"]
+
+
+def test_run_review_fail_closed_markdown_never_says_approved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for `render_markdown` recomputing its own verdict from (empty)
+    findings instead of consuming the already-authoritative `review["verdict"]` --
+    that bug rendered a fail_closed-invalidated (INCONCLUSIVE) review as "APPROVED —
+    no findings" in the Markdown report, contradicting CLAUDE.md's fail-closed rule.
+    """
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -7,0 +7 @@\n"
+        "+changed value\n"
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
+    monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
+    bad_finding = finding(rule_id="does-not-exist-1", confidence="high")
+    monkeypatch.setattr(
+        review_module,
+        "review_context",
+        lambda *_a, **_kw: {"findings": [bad_finding], "summary": "One violation."},
+    )
+    out_dir = tmp_path / "reports"
+
+    outcome = run_review(
+        diff=diff,
+        source_name="f.patch",
+        repo_root=tmp_path,
+        config=Config(evidence_policy="fail_closed"),
+        out_dir=out_dir,
+    )
+
+    assert outcome.exit_code == 4
+    markdown = (out_dir / "f.patch.md").read_text(encoding="utf-8")
+    assert "APPROVED" not in markdown
+    assert "VERDICT: INCONCLUSIVE" in markdown
+    assert "fail_closed" in markdown
 
 
 @pytest.mark.xfail(

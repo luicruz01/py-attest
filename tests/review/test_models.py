@@ -9,10 +9,11 @@ def valid_review() -> dict:
     return {
         "findings": [
             {
-                "rule": "3-PII-logging",
-                "severity": "S1",
-                "file": "app/main.py",
-                "line": 42,
+                "rule_id": "pii-1",
+                "path": "app/main.py",
+                "side": "new",
+                "line_start": 42,
+                "line_end": 42,
                 "title": "PII is logged",
                 "evidence": 'logger.info("%s", student.email)',
                 "explanation": "The changed line logs an email address.",
@@ -30,11 +31,11 @@ def test_valid_example_passes() -> None:
     assert validate_review_result(review) is review
 
 
-@pytest.mark.parametrize("mutation", ["severity", "verdict"])
-def test_invalid_severity_and_verdict_smuggling_fail(mutation: str) -> None:
+@pytest.mark.parametrize("mutation", ["side", "verdict"])
+def test_invalid_side_and_verdict_smuggling_fail(mutation: str) -> None:
     review = copy.deepcopy(valid_review())
-    if mutation == "severity":
-        review["findings"][0]["severity"] = "critical"
+    if mutation == "side":
+        review["findings"][0]["side"] = "sideways"
     else:
         review["verdict"] = "block"
 
@@ -95,16 +96,39 @@ def test_finding_confidence_must_be_valid() -> None:
         validate_review_result(review)
 
 
-def test_finding_line_must_be_an_integer_or_null() -> None:
+@pytest.mark.parametrize("field", ["line_start", "line_end"])
+def test_finding_line_bounds_must_be_positive_integers(field: str) -> None:
     review = valid_review()
-    review["findings"][0]["line"] = "42"
+    review["findings"][0][field] = "42"
 
-    with pytest.raises(SchemaValidationError, match="line must be an integer or null"):
+    with pytest.raises(SchemaValidationError, match="positive integer"):
         validate_review_result(review)
 
 
-def test_finding_line_may_be_null() -> None:
+def test_finding_line_bounds_cannot_be_null() -> None:
+    """Behavior change from the old schema: every finding must anchor to a real line
+    range within the changed lines for its declared side -- no file-level escape hatch.
+    Matches Seed B's contract and what reviewer_v3.md already asks the model to do.
+    """
     review = valid_review()
-    review["findings"][0]["line"] = None
+    review["findings"][0]["line_start"] = None
 
-    assert validate_review_result(review) is review
+    with pytest.raises(SchemaValidationError, match="positive integer"):
+        validate_review_result(review)
+
+
+def test_finding_line_end_must_not_be_before_line_start() -> None:
+    review = valid_review()
+    review["findings"][0]["line_start"] = 10
+    review["findings"][0]["line_end"] = 5
+
+    with pytest.raises(SchemaValidationError, match="line_end"):
+        validate_review_result(review)
+
+
+def test_finding_rule_id_must_be_a_string() -> None:
+    review = valid_review()
+    review["findings"][0]["rule_id"] = 123
+
+    with pytest.raises(SchemaValidationError, match="non-string text field"):
+        validate_review_result(review)

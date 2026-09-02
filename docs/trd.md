@@ -148,7 +148,7 @@ Click devuelve 2 en errores de uso: `main.py` los captura → 64.
 
 **`attest gate`** — `--branch <ref>` · `--base` · `--out` · `--no-llm`. Comodidad local y para repos privados sin forks: ejecuta `check` y luego `review` sobre `base...branch`, combina hallazgos y emite un solo reporte. Exit = máximo de ambos.
 
-**`attest doctor`**, **`attest standards build|lint|new-rule`**, **`attest new`**, **`attest upgrade`**, **`attest calibrate`**: sin cambios respecto a v0.1 §4.2, salvo `calibrate` que en v1 usa `--provider fake` para verificar el pipeline sin key.
+**`attest doctor`**, **`attest standards build|lint|new-rule`**, **`attest new`**, **`attest upgrade`**, **`attest calibrate`**: sin cambios respecto a v0.1 §4.2, salvo `calibrate` que en v1 usa `--provider fake` para verificar el pipeline sin key. `attest standards build --check` fails with exit 2 on drift; that exit code is not accompanied by a schema_version 3 JSON report (no `stage: "review"`, no `verdict` payload) -- it is a plain CLI failure.
 
 ### 4.3 Schema del reporte (JSON, `schema_version: 3`)
 

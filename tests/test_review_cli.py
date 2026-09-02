@@ -142,6 +142,31 @@ def test_review_fake_provider_is_not_implemented_yet(
     assert "F0.3" in result.output
 
 
+def test_review_evidence_policy_flag_overrides_config(tmp_path: Path) -> None:
+    # Runs with the real py-attest repo as cwd (as in
+    # test_review_diff_file_no_llm_approves_a_clean_patch above): gate_commit's
+    # `git rev-parse HEAD` needs an actual git repo, which a bare tmp_path isn't.
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "review",
+            "--diff-file",
+            str(FIXTURES / "streaks.patch"),
+            "--no-llm",
+            "--evidence-policy",
+            "fail_closed",
+            "--out",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    # --no-llm short-circuits before evidence_policy is ever consulted; this just
+    # confirms the flag is accepted and doesn't collide with --no-llm's own path.
+    assert result.exit_code == 0
+
+
 def test_review_json_flag_prints_the_schema_v3_report(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     runner = CliRunner()

@@ -1,0 +1,37 @@
+# Fingerprint-scoped allowlist (never path-scoped: a path exclusion would hide a real
+# leaked key in a test file, which is exactly the testing-2 failure mode this tool
+# exists to catch). Each entry below is the same fake, non-functional AWS-shaped fixture
+# key, used to test the secrets-gate/check pipeline; do not weaken the fixture value to
+# stop it matching gitleaks' aws-access-token rule -- being detectable is the point of
+# the test. (Deliberately not spelling the key out here: this file is itself scanned.)
+#
+# MAINTENANCE: these are line-pinned. Adding/removing lines above an entry's line number
+# in its file silently breaks that entry and turns self-hosted `attest check` red with a
+# false S1. After editing a file listed below, re-run (from the repo root):
+#   gitleaks detect --source . --no-git --report-format json --report-path - \
+#     --config py_attest/check/gitleaks-default-excludes.toml
+# and update the line numbers below to match.
+
+# tests/review/fixtures/secret.patch: fixture diff, used by
+# test_reviewer.py::test_secret_diff_blocks_with_redacted_reports_before_client_construction
+tests/review/fixtures/secret.patch:aws-access-token:6
+
+# test_secrets_gate.py: fixture diff for the firewall-config-injection regression test
+# (test_reviewed_repo_cannot_disable_the_firewall_with_its_own_gitleaks_config).
+tests/review/test_secrets_gate.py:aws-access-token:32
+
+# test_reviewer.py: five occurrences --
+#   171: asserted not to appear in test_secret_diff_blocks_...'s report/markdown/stdout.
+#   472: a context_files fixture, for test_run_review_scans_context_files_for_secrets_....
+#   493: that same test's assertion the key never reaches the JSON report.
+#   514: a --description value, for test_run_review_scans_description_for_secrets_....
+#   595: a --description value, for test_run_review_reports_an_honest_location_....
+tests/review/test_reviewer.py:aws-access-token:171
+tests/review/test_reviewer.py:aws-access-token:472
+tests/review/test_reviewer.py:aws-access-token:493
+tests/review/test_reviewer.py:aws-access-token:514
+tests/review/test_reviewer.py:aws-access-token:595
+
+# tests/check/test_runner.py: fixture .pyc content for the build-cache-exclusion
+# regression test (test_run_check_ignores_secrets_in_regenerated_build_caches).
+tests/check/test_runner.py:aws-access-token:365

@@ -38,9 +38,14 @@ attest = "py_attest.cli.main:cli"
 
 [project.optional-dependencies]
 scaffold = ["copier>=9"]
-openai = ["openai>=1.0"]
+# Pinned <2.0: Seed A's llm.py targets the openai 1.x chat-completions surface
+# (client.chat.completions.create, BadRequestError.param/.code); openai>=2.0 changed
+# that surface enough to break it. F0.3's provider Protocol (ADR-002) is expected to
+# move to the Responses API with store=False, at which point this pin should be
+# revisited/dropped -- tracked as an ADR-002 action item, not a permanent constraint.
+openai = ["openai>=1.0,<2.0"]
 anthropic = ["anthropic>=0.34"]
-all = ["copier>=9", "openai>=1.0", "anthropic>=0.34"]
+all = ["copier>=9", "openai>=1.0,<2.0", "anthropic>=0.34"]
 
 [dependency-groups]
 dev = [
@@ -73,11 +78,11 @@ select = ["E", "F", "W", "I", "UP", "S", "ERA", "ARG", "T20"]
 "py_attest/cli/*.py" = ["ARG001"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=py_attest --cov-report=term-missing --cov-fail-under=90"
+addopts = "--cov=py_attest --cov-report=term-missing --cov-fail-under=95"
 testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["py_attest"]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 95

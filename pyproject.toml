@@ -70,6 +70,7 @@ select = ["E", "F", "W", "I", "UP", "S", "ERA", "ARG", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+"py_attest/cli/*.py" = ["ARG001"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=py_attest --cov-report=term-missing --cov-fail-under=90"

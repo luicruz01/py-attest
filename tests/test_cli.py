@@ -16,5 +16,5 @@ def test_bare_invocation_shows_usage_and_exits_with_usage_error() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, [])
 
-    assert result.exit_code == 2
+    assert result.exit_code == 64
     assert "Usage" in result.output

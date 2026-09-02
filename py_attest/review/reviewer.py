@@ -122,7 +122,7 @@ def run_review(
         # firewall before any network call -- never trust the diff scan alone to cover
         # the full payload sent to the provider.
         try:
-            context_secret_findings = findings_for_diff(context, repo_root)
+            context_secret_findings = findings_for_diff(context, repo_root, require_location=False)
         except SecretsGateError as exc:
             raise InconclusiveError(str(exc)) from exc
 

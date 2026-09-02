@@ -89,7 +89,7 @@ def test_run_review_computes_and_publishes_verdict_without_network(
         "summary": "One violation found.",
         "metadata": {"temperature": "model-default"},
     }
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
     prompt_versions: list[str] = []
     models: list[str] = []
@@ -271,7 +271,7 @@ def test_run_review_appends_untrusted_description_and_selects_v1_prompt(
         captured["model"] = model
         return {"findings": [], "summary": "No violations."}
 
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
     monkeypatch.setattr(review_module, "review_context", fake_review)
     description = "Title\n\n$(touch should-never-run); <untrusted>body</untrusted>"
 
@@ -298,7 +298,7 @@ def test_run_review_falls_back_to_packaged_defaults_when_repo_has_no_standards_y
     """
     diff = "diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n+x\n"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
     monkeypatch.setattr(
         review_module, "review_context", lambda *_a, **_kw: {"findings": [], "summary": ""}
@@ -321,7 +321,7 @@ def test_run_review_raises_inconclusive_when_standards_yml_is_broken(
     (tmp_path / "core.standards.yml").write_text("not: [valid, standards", encoding="utf-8")
     (tmp_path / "domain.standards.yml").write_text("version: 1\nsections: []\n", encoding="utf-8")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
 
     with pytest.raises(InconclusiveError):
         run_review(
@@ -344,7 +344,7 @@ def test_run_review_fail_closed_invalidates_the_response_on_an_invalid_finding(
         "+changed value\n"
     )
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
     bad_finding = finding(rule_id="does-not-exist-1", confidence="high")
     monkeypatch.setattr(
@@ -463,7 +463,7 @@ def test_run_review_raises_inconclusive_when_the_llm_call_fails(
 def test_run_review_raises_inconclusive_when_gate_commit_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
 
     def fail(_root: Path) -> str:
         raise DiffError("git executable not found")
@@ -484,7 +484,7 @@ def test_run_review_raises_inconclusive_when_gate_commit_fails(
 def test_run_review_resolves_source_shas_when_branch_source_is_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
 
     outcome = run_review(
         diff="diff --git a/f b/f\n+x\n",
@@ -504,7 +504,7 @@ def test_run_review_resolves_source_shas_when_branch_source_is_given(
 def test_run_review_raises_inconclusive_when_source_sha_resolution_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
 
     def fail(_root: Path, _ref: str) -> str:
         raise DiffError("cannot resolve HEAD")
@@ -606,7 +606,7 @@ def test_run_review_raises_inconclusive_when_the_context_scan_fails(
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     calls = {"count": 0}
 
-    def flaky_scan(_text: str, _root: Path) -> list[dict[str, object]]:
+    def flaky_scan(_text: str, _root: Path, **_kw: object) -> list[dict[str, object]]:
         calls["count"] += 1
         if calls["count"] == 1:
             return []

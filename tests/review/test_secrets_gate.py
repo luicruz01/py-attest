@@ -250,8 +250,11 @@ def test_findings_for_diff_raises_when_no_source_line_can_be_located(
     """Behavior change: the old code fell back to file-level (line=None) findings when
     gitleaks reported no StartLine. Under the new canonical shape every diff-scoped
     secrets_gate finding needs a real side/line_start/line_end (spec §4.1) -- there's no
-    null escape hatch for this path (unlike the context_files/--description case in
-    reviewer.py, which never goes through secrets_gate on a real diff at all).
+    null escape hatch for this path by default (`require_location=True`). The
+    context_files/--description case in reviewer.py opts into a structurally-valid
+    placeholder instead by passing `require_location=False` -- see
+    test_findings_for_diff_returns_a_placeholder_location_when_require_location_is_false
+    below.
     """
     diff = "diff --git a/app/config.py b/app/config.py\n--- a/app/config.py\n+++ b/app/config.py\n"
     report = [{"RuleID": "generic-api-key"}]
@@ -264,3 +267,33 @@ def test_findings_for_diff_raises_when_no_source_line_can_be_located(
 
     with pytest.raises(secrets_gate.SecretsGateError, match="cannot locate a source line"):
         secrets_gate.findings_for_diff(diff, tmp_path)
+
+
+def test_findings_for_diff_returns_a_placeholder_location_when_require_location_is_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reviewer.py's context-scan call (secrets that may live in context_files/
+    --description, not the diff itself) passes require_location=False: an unlocatable hit
+    must not raise there, since content outside the diff is legitimately never locatable
+    by a diff-line walk. It gets a structurally valid (non-null) placeholder finding
+    instead -- reviewer.py's _blocked_review(..., anchor_to_diff=False) always overwrites
+    these placeholder location fields with an honest "can't be trusted" marker before a
+    report is ever written, so the exact placeholder values here are not load-bearing.
+    """
+    diff = "diff --git a/app/config.py b/app/config.py\n--- a/app/config.py\n+++ b/app/config.py\n"
+    report = [{"RuleID": "generic-api-key"}]
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, json.dumps(report), "")
+
+    monkeypatch.setattr(secrets_gate.shutil, "which", lambda _name: "/usr/bin/gitleaks")
+    monkeypatch.setattr(secrets_gate.subprocess, "run", fake_run)
+
+    findings = secrets_gate.findings_for_diff(diff, tmp_path, require_location=False)
+
+    assert len(findings) == 1
+    assert findings[0]["rule_id"] == "secrets-1"
+    assert findings[0]["path"] is not None
+    assert findings[0]["side"] is not None
+    assert findings[0]["line_start"] is not None
+    assert findings[0]["line_end"] is not None

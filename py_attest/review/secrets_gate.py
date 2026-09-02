@@ -18,7 +18,12 @@ class SecretsGateError(RuntimeError):
     """Raised when the deterministic secrets scan cannot complete."""
 
 
-def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # noqa: ARG001
+def findings_for_diff(
+    diff: str,
+    repo_root: Path,  # noqa: ARG001
+    *,
+    require_location: bool = True,
+) -> list[dict[str, Any]]:
     """Run Gitleaks on ``diff`` via stdin and return redacted S1 findings.
 
     ``repo_root`` is accepted for API stability but deliberately NOT used as the
@@ -29,6 +34,19 @@ def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # no
     matching the leaked secret's fingerprint, would silently disable this firewall and
     let a real secret reach the LLM provider. The scan is stdin-only and needs no files
     from the repo, so it runs from a throwaway directory the reviewed repo cannot reach.
+
+    ``require_location`` gates what happens when a detected secret's source line can't be
+    located within ``diff``. For the primary, diff-scoped firewall call (the default,
+    ``True``), a real diff's hits should always be locatable, so an unlocatable hit is
+    suspicious and this raises. `reviewer.py` also reuses this function to scan the
+    broader assembled review *context* (rules block + context_files + diff +
+    --description) for secrets outside the diff -- content there (e.g. a context_files
+    entry, rendered before <unified-diff>) is legitimately never locatable by a
+    diff-line walk. That caller passes ``require_location=False`` to get a structurally
+    valid (non-null) placeholder finding back instead of an exception; it always routes
+    the result through `_blocked_review(..., anchor_to_diff=False)`, which unconditionally
+    overwrites path/side/line_start/line_end with an honest "can't be trusted" placeholder
+    -- so the values built here for that case never reach a report.
     """
     gitleaks_executable = shutil.which("gitleaks")
     if gitleaks_executable is None:
@@ -73,11 +91,14 @@ def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # no
         diff_line = _positive_int(leak_value.get("StartLine"))
         located = _located_line_for_diff_line(diff, diff_line)
         if located is None:
-            raise SecretsGateError(
-                f"cannot locate a source line for a detected secret ({detector}); "
-                "the diff-scoped firewall requires a real side/line to report"
-            )
-        file_name, side, source_line = located
+            if require_location:
+                raise SecretsGateError(
+                    f"cannot locate a source line for a detected secret ({detector}); "
+                    "the diff-scoped firewall requires a real side/line to report"
+                )
+            file_name, side, source_line = _fallback_file(diff, leak_value.get("File")), "new", 1
+        else:
+            file_name, side, source_line = located
         evidence = _safe_evidence_for_diff_line(diff, diff_line)
         findings.append(
             {

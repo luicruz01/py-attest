@@ -2482,7 +2482,7 @@ def _finding_v3(finding: dict[str, Any]) -> dict[str, Any]:
     }
 ```
 
-`.get()` (not `[...]`) for `side`/`line_start`/`line_end`/`severity` preserves the one pre-existing case where they're legitimately absent: the context-level-secret path in `reviewer.py` (`_blocked_review(..., anchor_to_diff=False)`), whose findings never carry those keys at all (spec §4.1's scope refinement) — Task 12 keeps that branch's dict shape as-is.
+`.get()` (not `[...]`) for `side`/`line_start`/`line_end`/`severity` preserves the one pre-existing case where they're legitimately absent: the context-level-secret path in `reviewer.py` (`_blocked_review(..., anchor_to_diff=False)`). That branch must still set `side`/`line_start`/`line_end` to `None` itself — it does not get that for free just because `_finding_v3` uses `.get()` here. `.get()` only means "missing keys read as `None` instead of crashing"; it does not erase a wrong, present value for `path` (a required key elsewhere in this function) that `secrets_gate.py` (Task 10) already computed and that `_blocked_review` fails to override under the old `file`/`line` key names. Task 12 fixes `_blocked_review` itself to write `path`/`side`/`line_start`/`line_end` under the new names — see its Step 4.
 
 Also update `render_markdown`'s finding-table row and detail section (currently referencing `finding["rule"]` at the two spots — the `cells = (...)` tuple and the `f"- Rule: \`{finding['rule']}\`"` line): replace both `finding["rule"]` with `finding["rule_id"]`, and `_finding_location`'s `finding["file"]`/`finding["line"]` with `finding["path"]`/`finding.get("line_start")` (keep the fallback to `None` since `render_markdown` operates on the pre-report-mapping internal dict, which for the context-secret case also lacks `line_start`).
 
@@ -2770,7 +2770,20 @@ def test_run_review_fail_closed_invalidates_the_response_on_an_invalid_finding(
 
 **`test_run_review_rejects_a_context_too_large_for_the_configured_limit`** — no change needed (uses `--description` size only, findings-agnostic).
 
-**`test_run_review_reports_an_honest_location_for_context_level_secrets`** (the one at line 577-604) — no change needed: this is exactly the pre-existing "context-level secret" case spec §4.1 explicitly kept nullable (`path`/`line_start` stay as they are today).
+**`test_run_review_reports_an_honest_location_for_context_level_secrets`** (the one at line 577-604) — **does** need a change (correcting an earlier mistake in this plan: this is not "no change needed"). `_located_line_for_diff_line` doesn't fail closed for this case — it succeeds *wrongly*: the diff's old_line/new_line tracking state, once set while walking the real `<unified-diff>` section embedded in `context`, keeps incrementing through every subsequent line (including the `<author-stated-intent>` text appended after it), so it can report a fabricated `app/main.py`/`"new"`/some-line for a secret that's actually in `--description`, not the diff. `_blocked_review`'s `anchor_to_diff=False` override exists specifically to discard that untrustworthy location — see the fix to `_blocked_review` itself below, in Step 4. Update the assertions:
+
+```python
+    [finding] = outcome.json_report["findings"]
+    assert finding["path"] == "<review context: context_files or --description>"
+    assert finding["side"] is None
+    assert finding["line_start"] is None
+    assert finding["line_end"] is None
+    assert "app/main.py" not in outcome.json_report["note"]
+    assert "assembled review context" in outcome.json_report["note"]
+    assert outcome.json_report["note"] != review_module.FIREWALL_SKIP_NOTE
+```
+
+(was: only `finding["path"]` and `finding["line_start"] is None` were checked, using the old `file`/`line`-derived output naming that happened to already read `path`/`line_start` at the JSON boundary even before this WP, since `_finding_v3` already renamed `file`→`path`/`line`→`line_start` on output. The bug this plan almost shipped: `_blocked_review`'s override wrote to `file`/`line` — keys nothing reads anymore after Task 11's `_finding_v3` change to direct passthrough — while the real, potentially-fabricated `path`/`side`/`line_start`/`line_end` computed by `secrets_gate.py` (Task 10) passed through untouched. `side`/`line_end` weren't asserted before; they are now, since both must be `None` for this to be verifiably honest.)
 
 - [ ] **Step 3: Run to verify failure**
 
@@ -2999,6 +3012,40 @@ And the verdict call (currently `verdict_name, exit_code = verdict(review["findi
 ```python
     verdict_name, exit_code = verdict(review["findings"], review_complete=review_complete)
     review["verdict"] = verdict_name
+```
+
+**Fix `_blocked_review`'s `anchor_to_diff=False` override to the new field names.** This is the gap caught in review: `secrets_gate.py` (Task 10) already computes real `path`/`side`/`line_start`/`line_end` on every finding it returns — including when it's scanning `context` (not a real diff) for a secret in `context_files`/`--description`, where that location can be actively wrong. (Concretely: `_located_line_for_diff_line` doesn't fail closed there — the diff's line-tracking state, once set while walking the real `<unified-diff>` section embedded in `context`, keeps incrementing through every line that follows, including the `<author-stated-intent>` text appended after it, so it can report a fabricated `app/main.py`/`"new"`/some-line for a secret that's actually in `--description`.) The whole reason `anchor_to_diff=False` exists is to discard that location — but if the override still writes to the retired `file`/`line` keys, it adds two inert keys nothing reads anymore (`_finding_v3`, Task 11, reads `path`/`side`/`line_start`/`line_end` directly) while the real, possibly-fabricated values pass through untouched. Find the current `_blocked_review` function (near the bottom of the file, after `_append_description`):
+
+```python
+def _blocked_review(
+    secret_findings: list[dict[str, Any]], *, note: str, anchor_to_diff: bool
+) -> dict[str, Any]:
+    """Build the review dict for a firewall-blocked run, bypassing postfilter entirely.
+    ...
+    """
+    findings = []
+    for finding in secret_findings:
+        finding = {**finding, "evidence_verified": True}
+        if not anchor_to_diff:
+            finding["file"] = "<review context: context_files or --description>"
+            finding["line"] = None
+        findings.append(finding)
+    return {
+        "findings": findings,
+        "summary": "Secret detection blocked review before any LLM transmission.",
+        "filtered_out": [],
+        "note": note,
+    }
+```
+
+Change only the four-line `if not anchor_to_diff:` block (the docstring and everything else stays as-is):
+
+```python
+        if not anchor_to_diff:
+            finding["path"] = "<review context: context_files or --description>"
+            finding["side"] = None
+            finding["line_start"] = None
+            finding["line_end"] = None
 ```
 
 - [ ] **Step 5: Run to verify pass**

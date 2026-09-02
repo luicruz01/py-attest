@@ -39,3 +39,8 @@ tests/check/test_runner.py:aws-access-token:365
 # eval/golden/feature/email-reminders/diff.patch: fake SendGrid API key fixture,
 # part of the golden-set regression test suite (not a real credential).
 eval/golden/feature/email-reminders/diff.patch:generic-api-key:13
+
+# tests/eval/test_record.py: fixture diff for the record.py secrets-firewall regression
+# test (test_record_response_never_calls_the_provider_when_a_secret_is_detected) -- a
+# fresh fake AWS-shaped key, distinct from the other fixtures above.
+tests/eval/test_record.py:aws-access-token:33

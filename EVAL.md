@@ -43,11 +43,27 @@ ground truth this golden set no longer uses.
 Both modes are measured, and sealed as baselines, symmetrically — neither inherits Seed
 A's historical number as its target. To produce these tables:
 
-1. Record all 8 branches for one egress mode with a real provider key:
+1. Record all 8 branches for one egress mode with a real provider key. Skip any branch
+   whose `expected.json` already contains a `secrets-1` finding -- the real pipeline's
+   deterministic-secret-detection branch fires before the LLM is ever called for that
+   branch (`review/reviewer.py`'s `FIREWALL_SKIP_NOTE` path; currently only
+   `feature/email-reminders`), so `record.py` would just spend a real API call and
+   transmit a secret-bearing payload to produce a recording nothing replays (`record.py`
+   also refuses this itself, as defense in depth, but the loop below skips it first so
+   one branch failing doesn't abort the rest):
    ```bash
    for expected in eval/golden/*/*/expected.json; do
      branch_dir=$(dirname "$expected")
      branch=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['branch'])" "$expected")
+     has_secret=$(python3 -c "
+import json, sys
+data = json.load(open(sys.argv[1]))
+print('yes' if any(f['rule_id'] == 'secrets-1' for f in data['findings']) else 'no')
+" "$expected")
+     if [ "$has_secret" = "yes" ]; then
+       echo "skipping $branch: secrets-1 fires deterministically, the LLM is never called for this branch"
+       continue
+     fi
      uv run python -m py_attest.eval.record \
        --diff "$branch_dir/diff.patch" --provider openai --egress raw \
        --out "$branch_dir/provider_response.raw.json" --branch "$branch"

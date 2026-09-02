@@ -26,6 +26,7 @@ from py_attest.llm.types import ProviderFailure, ProviderRequest
 from py_attest.review.context_pack import render_rules_block
 from py_attest.review.models import REVIEW_SCHEMA
 from py_attest.review.reviewer import _build_egress, _build_provider, _standards_paths
+from py_attest.review.secrets_gate import SecretsGateError, findings_for_diff
 from py_attest.standards.registry import RegistryError, load_registry
 
 _EGRESS_MODES = {"raw", "minimized"}
@@ -76,6 +77,24 @@ def record_response(
     egress_result = _build_egress(
         egress_mode, diff, repo_root, config, None, source_name, rules_block
     )
+
+    # Mirrors reviewer.py's own context-scan pattern exactly (CLAUDE.md: "the secrets
+    # firewall runs before any LLM call. A detected secret blocks and the diff is never
+    # transmitted"). Without this, recording would spend a real API call and transmit a
+    # secret-bearing payload for a branch the real pipeline never sends to a provider at
+    # all (run_review's deterministic-secret-detection branch fires first there).
+    try:
+        secret_findings = findings_for_diff(
+            egress_result.user_content, repo_root, require_location=False
+        )
+    except SecretsGateError as exc:
+        raise RecordError(str(exc)) from exc
+    if secret_findings:
+        raise RecordError(
+            "secrets firewall: the egress payload contains a detected secret; "
+            "the real pipeline never calls the provider for this branch, so recording it "
+            "would be pointless and unsafe"
+        )
 
     try:
         provider_instance = _build_provider(

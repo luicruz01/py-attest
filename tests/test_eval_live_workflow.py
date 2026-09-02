@@ -30,3 +30,16 @@ def test_eval_live_workflow_needs_a_provider_key_secret() -> None:
 
     assert "OPENAI_API_KEY" in rendered_steps
     assert "secrets." in rendered_steps
+
+
+def test_eval_live_workflow_open_pr_job_has_write_permissions() -> None:
+    """peter-evans/create-pull-request@v6 (used by open-pr) needs contents: write and
+    pull-requests: write. No workflow in this repo declares `permissions:` by default,
+    so without an explicit block this job's actual permissions depend entirely on the
+    repo/org default -- which can be read-only, failing this job's last step after
+    record-and-score has already spent real API calls."""
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    open_pr_permissions = workflow["jobs"]["open-pr"]["permissions"]
+
+    assert open_pr_permissions["contents"] == "write"
+    assert open_pr_permissions["pull-requests"] == "write"

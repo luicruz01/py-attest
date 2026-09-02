@@ -8,11 +8,18 @@ finding, matching the schema_version 3 report shape (TRD SS4.3).
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from py_attest.config import Config
+from py_attest.review.reviewer import run_review
 
 
 class EvaluationError(ValueError):
@@ -212,3 +219,171 @@ def apply_adjudications(
         false_positives=remaining_fp,
         false_negatives=remaining_fn,
     )
+
+
+_READING_NAMES = ("strict", "adjudicated", "severity_exact")
+
+
+@dataclass(frozen=True)
+class BranchResult:
+    branch: str
+    expected_verdict: str
+    predicted_verdict: str | None
+    readings: dict[str, FindingResults]
+
+
+@dataclass
+class EgressResults:
+    egress: str
+    branches: list[BranchResult] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    @property
+    def readings(self) -> dict[str, FindingResults]:
+        combined: dict[str, FindingResults] = {name: FindingResults() for name in _READING_NAMES}
+        for branch in self.branches:
+            for name, result in branch.readings.items():
+                combined[name].true_positives.extend(result.true_positives)
+                combined[name].false_positives.extend(result.false_positives)
+                combined[name].false_negatives.extend(result.false_negatives)
+        return combined
+
+    @property
+    def accuracy(self) -> float:
+        correct = sum(
+            b.predicted_verdict is not None and b.predicted_verdict == b.expected_verdict
+            for b in self.branches
+        )
+        return _ratio(correct, len(self.branches))
+
+    @property
+    def block_recall(self) -> float:
+        expected_blocks = [b for b in self.branches if b.expected_verdict == "BLOCK"]
+        true_blocks = sum(b.predicted_verdict == "BLOCK" for b in expected_blocks)
+        return _ratio(true_blocks, len(expected_blocks))
+
+    @property
+    def block_precision(self) -> float:
+        predicted_blocks = [b for b in self.branches if b.predicted_verdict == "BLOCK"]
+        true_blocks = sum(b.expected_verdict == "BLOCK" for b in predicted_blocks)
+        return _ratio(true_blocks, len(predicted_blocks))
+
+
+def evaluate(golden_dir: Path, egress: str, *, require_all: bool = False) -> EgressResults:
+    """Replay each branch's provider_response.<egress>.json through the real pipeline
+    (reviewer.run_review with provider="fake") and score it under all three readings.
+    A branch with no recording for this egress mode is skipped unless require_all."""
+    if egress not in {"raw", "minimized"}:
+        raise EvaluationError(f"unknown egress mode: {egress!r}")
+
+    adjudications = load_adjudications(golden_dir / "adjudications.yml")
+    results = EgressResults(egress=egress)
+
+    for expected_path in sorted(golden_dir.glob("*/*/expected.json")):
+        branch_dir = expected_path.parent
+        branch = json.loads(expected_path.read_text(encoding="utf-8"))
+        recording_path = branch_dir / f"provider_response.{egress}.json"
+
+        if not recording_path.is_file():
+            if require_all:
+                raise EvaluationError(
+                    f"missing provider_response.{egress}.json for {branch['branch']}"
+                )
+            results.skipped.append(branch["branch"])
+            continue
+
+        diff = (branch_dir / "diff.patch").read_text(encoding="utf-8")
+        # run_review always writes a JSON+MD report under out_dir -- golden_dir is a
+        # real, committed directory (eval/golden/), so that report must land in a
+        # scratch location, never alongside the fixtures themselves.
+        with tempfile.TemporaryDirectory() as scratch_dir:
+            outcome = run_review(
+                diff=diff,
+                source_name=branch["branch"].replace("/", "-"),
+                repo_root=branch_dir,
+                config=Config(),
+                out_dir=Path(scratch_dir),
+                provider="fake",
+                fake_response=str(recording_path),
+                egress=egress,
+                as_json=True,
+            )
+        predicted_findings = outcome.json_report["findings"]
+
+        strict = match_findings(branch["branch"], branch["findings"], predicted_findings)
+        readings = {
+            "strict": strict,
+            "adjudicated": apply_adjudications(
+                branch["branch"], strict, predicted_findings, adjudications
+            ),
+            "severity_exact": severity_exact_results(strict),
+        }
+        results.branches.append(
+            BranchResult(
+                branch=branch["branch"],
+                expected_verdict=branch["verdict"],
+                predicted_verdict=outcome.json_report["verdict"],
+                readings=readings,
+            )
+        )
+
+    return results
+
+
+def render_markdown(results: EgressResults) -> str:
+    lines = [
+        f"# Reviewer evaluation -- egress={results.egress}",
+        "",
+        f"- Branches scored: {len(results.branches)}",
+        f"- Branches skipped (no recording yet): {len(results.skipped)}"
+        + (f" ({', '.join(results.skipped)})" if results.skipped else ""),
+        f"- Block recall: {_percent(results.block_recall)}",
+        f"- Block precision: {_percent(results.block_precision)}",
+        f"- Verdict accuracy: {_percent(results.accuracy)}",
+        "",
+    ]
+    for name in _READING_NAMES:
+        reading = results.readings[name]
+        lines.extend(
+            [
+                f"## Findings -- {name}",
+                "",
+                f"- Precision: {_percent(reading.precision)}",
+                f"- Recall: {_percent(reading.recall)}",
+                f"- F1: {_percent(reading.f1)}",
+                f"- TP: {len(reading.true_positives)} / FP: {len(reading.false_positives)} "
+                f"/ FN: {len(reading.false_negatives)}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _percent(value: float) -> str:
+    return f"{value:.1%}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--golden-dir", type=Path, default=Path.cwd() / "eval" / "golden")
+    parser.add_argument("--egress", choices=["raw", "minimized"], required=True)
+    parser.add_argument("--require-all", action="store_true")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+
+    try:
+        results = evaluate(args.golden_dir, args.egress, require_all=args.require_all)
+    except EvaluationError as exc:
+        sys.stderr.write(f"evaluation failed: {exc}\n")
+        return 2
+
+    report = render_markdown(results)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(report, encoding="utf-8")
+    sys.stdout.write(report)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

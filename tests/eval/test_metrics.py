@@ -1,10 +1,21 @@
 """Tests for the golden-set matcher and finding-level readings."""
 
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
 from py_attest.eval.metrics import (
+    EvaluationError,
     FindingResults,
     apply_adjudications,
+    evaluate,
     findings_match,
+    main,
     match_findings,
+    render_markdown,
     severity_exact_results,
 )
 
@@ -178,3 +189,177 @@ def test_adjudications_only_apply_to_their_own_branch() -> None:
     assert adjudicated.true_positives == []
     assert len(adjudicated.false_negatives) == 1
     assert len(adjudicated.false_positives) == 1
+
+
+def _init_git_repo(root: Path) -> None:
+    """run_review's _gate_commit unconditionally runs `git rev-parse HEAD` in repo_root
+    (even for a provider="fake" replay) -- give evaluate()'s fixtures a real, hermetic
+    git ancestor rather than mocking that away, so these tests actually exercise the
+    real pipeline end to end."""
+    git_executable = shutil.which("git")
+    assert git_executable is not None
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(  # noqa: S603 - resolved executable, fixed arguments, no shell
+            [git_executable, *args], cwd=root, check=True
+        )
+    (root / ".gitkeep").write_text("", encoding="utf-8")
+    for args in (["add", "."], ["commit", "-q", "-m", "init"]):
+        subprocess.run(  # noqa: S603 - resolved executable, fixed arguments, no shell
+            [git_executable, *args], cwd=root, check=True
+        )
+
+
+def _write_branch(
+    tmp_path, branch: str, *, verdict: str, findings: list[dict], recording: dict | None
+) -> None:
+    if not (tmp_path / ".git").is_dir():
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        _init_git_repo(tmp_path)
+    branch_dir = tmp_path / branch
+    branch_dir.mkdir(parents=True)
+    (branch_dir / "diff.patch").write_text(
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,1 +1,2 @@\n x\n+y\n",
+        encoding="utf-8",
+    )
+    (branch_dir / "expected.json").write_text(
+        json.dumps(
+            {
+                "branch": branch,
+                "source": {
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "merge_base_sha": "a" * 40,
+                    "patch_sha256": "c" * 64,
+                },
+                "verdict": verdict,
+                "findings": findings,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if recording is not None:
+        (branch_dir / "provider_response.raw.json").write_text(
+            json.dumps(recording), encoding="utf-8"
+        )
+
+
+def test_evaluate_skips_branches_with_no_recording_when_require_all_is_false(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
+
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    assert results.branches == []
+    assert results.skipped == ["feature/clean"]
+
+
+def test_evaluate_replays_a_recording_through_the_full_pipeline(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    assert results.skipped == []
+    assert len(results.branches) == 1
+    branch = results.branches[0]
+    assert branch.branch == "feature/clean"
+    assert branch.expected_verdict == "APPROVE"
+    assert branch.predicted_verdict == "APPROVE"
+    assert branch.readings["strict"].true_positives == []
+
+
+def test_evaluate_raises_when_require_all_and_a_recording_is_missing(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
+
+    with pytest.raises(EvaluationError, match="feature/clean"):
+        evaluate(golden_dir, "raw", require_all=True)
+
+
+def test_render_markdown_includes_all_three_readings(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    report = render_markdown(results)
+
+    assert "strict" in report
+    assert "adjudicated" in report
+    assert "severity_exact" in report
+    assert "raw" in report
+
+
+def test_evaluate_rejects_an_unknown_egress_mode(tmp_path) -> None:
+    with pytest.raises(EvaluationError, match="unknown egress mode"):
+        evaluate(tmp_path / "golden", "bogus")
+
+
+def test_main_prints_the_report_and_returns_zero(tmp_path, capsys) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+
+    exit_code = main(["--golden-dir", str(golden_dir), "--egress", "raw"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "strict" in out
+    assert "raw" in out
+
+
+def test_main_writes_the_report_to_output_when_given(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+    output_path = tmp_path / "reports" / "eval.md"
+
+    exit_code = main(
+        [
+            "--golden-dir",
+            str(golden_dir),
+            "--egress",
+            "raw",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert "strict" in output_path.read_text(encoding="utf-8")
+
+
+def test_main_returns_two_and_prints_to_stderr_on_evaluation_error(tmp_path, capsys) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
+
+    exit_code = main(["--golden-dir", str(golden_dir), "--egress", "raw", "--require-all"])
+
+    assert exit_code == 2
+    assert "evaluation failed" in capsys.readouterr().err

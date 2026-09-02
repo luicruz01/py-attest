@@ -35,3 +35,7 @@ tests/review/test_reviewer.py:aws-access-token:595
 # tests/check/test_runner.py: fixture .pyc content for the build-cache-exclusion
 # regression test (test_run_check_ignores_secrets_in_regenerated_build_caches).
 tests/check/test_runner.py:aws-access-token:365
+
+# eval/golden/feature/email-reminders/diff.patch: fake SendGrid API key fixture,
+# part of the golden-set regression test suite (not a real credential).
+eval/golden/feature/email-reminders/diff.patch:generic-api-key:13

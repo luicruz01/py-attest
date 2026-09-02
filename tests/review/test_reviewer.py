@@ -20,12 +20,13 @@ from py_attest.review.secrets_gate import SecretsGateError
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def finding(*, severity: str, confidence: str) -> dict[str, object]:
+def finding(*, rule_id: str, confidence: str) -> dict[str, object]:
     return {
-        "rule": "6-review-severity",
-        "severity": severity,
-        "file": "app/main.py",
-        "line": 7,
+        "rule_id": rule_id,
+        "path": "app/main.py",
+        "side": "new",
+        "line_start": 7,
+        "line_end": 7,
         "title": "Review policy violation",
         "evidence": "changed value",
         "explanation": "The changed code violates a team standard.",
@@ -58,10 +59,12 @@ def test_markdown_explicitly_approves_zero_findings() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model_finding", "expected_verdict", "expected_exit"),
+    ("model_finding", "expected_severity", "expected_verdict", "expected_exit"),
     [
-        pytest.param(finding(severity="S1", confidence="low"), "COMMENT", 0, id="low-S1"),
-        pytest.param(finding(severity="S2", confidence="medium"), "BLOCK", 2, id="medium-S2"),
+        pytest.param(finding(rule_id="pii-1", confidence="low"), "S1", "COMMENT", 0, id="low-S1"),
+        pytest.param(
+            finding(rule_id="testing-2", confidence="medium"), "S2", "BLOCK", 2, id="medium-S2"
+        ),
     ],
 )
 def test_run_review_computes_and_publishes_verdict_without_network(
@@ -69,6 +72,7 @@ def test_run_review_computes_and_publishes_verdict_without_network(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     model_finding: dict[str, object],
+    expected_severity: str,
     expected_verdict: str,
     expected_exit: int,
 ) -> None:
@@ -126,11 +130,13 @@ def test_run_review_computes_and_publishes_verdict_without_network(
     assert json_report["summary"] == model_review["summary"]
     assert json_report["filtered_out"] == []
     [reported_finding] = json_report["findings"]
-    assert reported_finding["rule_id"] == model_finding["rule"]
-    assert reported_finding["severity"] == model_finding["severity"]
+    assert reported_finding["rule_id"] == model_finding["rule_id"]
+    assert reported_finding["severity"] == expected_severity
     assert reported_finding["confidence"] == model_finding["confidence"]
-    assert reported_finding["path"] == model_finding["file"]
-    assert reported_finding["line_start"] == model_finding["line"]
+    assert reported_finding["path"] == model_finding["path"]
+    assert reported_finding["side"] == model_finding["side"]
+    assert reported_finding["line_start"] == model_finding["line_start"]
+    assert reported_finding["line_end"] == model_finding["line_end"]
     assert reported_finding["evidence_verified"] is True
     assert json_report["meta"]["prompt_version"] == "v3"
     assert json_report["meta"]["model"] == "gpt-5-mini"
@@ -191,7 +197,7 @@ def test_secret_diff_blocks_with_redacted_reports_before_client_construction(
     assert report["note"] == FIREWALL_SKIP_NOTE
     assert report["filtered_out"] == []
     assert all(
-        finding["rule_id"] == "5-secrets"
+        finding["rule_id"] == "secrets-1"
         and finding["severity"] == "S1"
         and finding["confidence"] == "high"
         for finding in report["findings"]
@@ -284,6 +290,84 @@ def test_run_review_appends_untrusted_description_and_selects_v1_prompt(
     assert captured["prompt_version"] == "v1"
 
 
+def test_run_review_falls_back_to_packaged_defaults_when_repo_has_no_standards_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """repo_root here has no core.standards.yml/domain.standards.yml -- confirms the
+    fallback documented in spec §5.3 rather than a hard failure.
+    """
+    diff = "diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n+x\n"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
+    monkeypatch.setattr(
+        review_module, "review_context", lambda *_a, **_kw: {"findings": [], "summary": ""}
+    )
+
+    outcome = run_review(
+        diff=diff,
+        source_name="f.patch",
+        repo_root=tmp_path,
+        config=Config(),
+        out_dir=tmp_path / "reports",
+    )
+
+    assert outcome.exit_code == 0
+
+
+def test_run_review_raises_inconclusive_when_standards_yml_is_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "core.standards.yml").write_text("not: [valid, standards", encoding="utf-8")
+    (tmp_path / "domain.standards.yml").write_text("version: 1\nsections: []\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+
+    with pytest.raises(InconclusiveError):
+        run_review(
+            diff="diff --git a/f b/f\n--- a/f\n+++ b/f\n+x\n",
+            source_name="f.patch",
+            repo_root=tmp_path,
+            config=Config(),
+            out_dir=tmp_path / "reports",
+        )
+
+
+def test_run_review_fail_closed_invalidates_the_response_on_an_invalid_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -7,0 +7 @@\n"
+        "+changed value\n"
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root: [])
+    monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
+    bad_finding = finding(rule_id="does-not-exist-1", confidence="high")
+    monkeypatch.setattr(
+        review_module,
+        "review_context",
+        lambda *_a, **_kw: {"findings": [bad_finding], "summary": "One violation."},
+    )
+
+    outcome = run_review(
+        diff=diff,
+        source_name="f.patch",
+        repo_root=tmp_path,
+        config=Config(evidence_policy="fail_closed"),
+        out_dir=tmp_path / "reports",
+    )
+
+    assert outcome.json_report["verdict"] == "INCONCLUSIVE"
+    assert outcome.exit_code == 4
+    assert outcome.json_report["findings"] == []
+    assert "fail_closed" in outcome.json_report["note"]
+    assert "1 of 1" in outcome.json_report["note"]
+
+
 @pytest.mark.xfail(
     reason=(
         "tests py-attest-template's generated workflow (PR_DESCRIPTION -> --description); "
@@ -341,7 +425,7 @@ def test_run_review_raises_inconclusive_when_context_pack_fails(
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    def fail(_diff: str, _root: Path, _files: object) -> str:
+    def fail(_diff: str, _root: Path, _files: object, _rules_block: object = None) -> str:
         raise context_pack_module.ContextPackError("required context file missing: x")
 
     monkeypatch.setattr(review_module, "build_context", fail)
@@ -450,17 +534,6 @@ def test_run_review_rejects_unimplemented_egress_mode(tmp_path: Path) -> None:
         )
 
 
-def test_run_review_rejects_unimplemented_evidence_policy(tmp_path: Path) -> None:
-    with pytest.raises(click.UsageError, match="evidence_policy='fail_closed' is not implemented"):
-        run_review(
-            diff="diff --git a/f b/f\n+x\n",
-            source_name="f.patch",
-            repo_root=tmp_path,
-            config=Config(evidence_policy="fail_closed"),
-            out_dir=tmp_path / "reports",
-        )
-
-
 def test_run_review_scans_context_files_for_secrets_before_transmitting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -496,7 +569,13 @@ def test_run_review_scans_context_files_for_secrets_before_transmitting(
 def test_run_review_scans_description_for_secrets_before_transmitting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    diff = "diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n+x\n"
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -1,0 +1 @@\n"
+        "+x\n"
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
 
@@ -582,7 +661,13 @@ def test_run_review_reports_an_honest_location_for_context_level_secrets(
     fabricated file:line for a secret that was actually in --description. Regression test
     for a report-accuracy gap found in review.
     """
-    diff = "diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n+x\n"
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -1,0 +1 @@\n"
+        "+x\n"
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
 
@@ -597,7 +682,9 @@ def test_run_review_reports_an_honest_location_for_context_level_secrets(
 
     [finding] = outcome.json_report["findings"]
     assert finding["path"] == "<review context: context_files or --description>"
+    assert finding["side"] is None
     assert finding["line_start"] is None
+    assert finding["line_end"] is None
     assert "app/main.py" not in outcome.json_report["note"]
     assert "assembled review context" in outcome.json_report["note"]
     assert outcome.json_report["note"] != review_module.FIREWALL_SKIP_NOTE

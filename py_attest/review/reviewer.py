@@ -1,5 +1,5 @@
 """Orchestrate the review pipeline: diff -> secrets firewall -> egress -> provider ->
-postfilter -> policy -> report. Never executes code from the reviewed repository.
+validation -> policy -> report. Never executes code from the reviewed repository.
 """
 
 import json
@@ -12,18 +12,21 @@ import click
 from py_attest.config import Config
 from py_attest.errors import InconclusiveError
 from py_attest.llm.providers.openai import LLMReviewError, MissingProviderKeyError, review_context
-from py_attest.review.context_pack import ContextPackError, build_context
+from py_attest.review.context_pack import ContextPackError, build_context, render_rules_block
 from py_attest.review.diff import DiffError, _gate_commit, _merge_base, _resolve_sha, patch_sha256
 from py_attest.review.policy import verdict
-from py_attest.review.postfilter import filter_findings
+from py_attest.review.postfilter import merge_findings
 from py_attest.review.report import build_json_report, render_markdown
 from py_attest.review.secrets_gate import SecretsGateError, findings_for_diff
+from py_attest.review.validation import validate_findings
+from py_attest.standards.registry import RegistryError, load_registry
 
 FIREWALL_SKIP_NOTE = "LLM review skipped: secret detected in diff; diff was not transmitted."
 CONTEXT_FIREWALL_SKIP_NOTE = (
     "LLM review skipped: secret detected in the assembled review context "
     "(context_files or --description); nothing was transmitted."
 )
+_STANDARDS_DEFAULTS_DIR = Path(__file__).resolve().parents[1] / "standards" / "defaults"
 
 
 class ReviewOutcome(NamedTuple):
@@ -31,6 +34,19 @@ class ReviewOutcome(NamedTuple):
 
     exit_code: int
     json_report: dict[str, Any]
+
+
+def _standards_paths(repo_root: Path, config: Config) -> tuple[Path, Path]:
+    """Repo-local standards.yml if present, else the packaged defaults -- so a repo that
+    hasn't run `attest new`/`attest upgrade` yet still gets a working review (spec §5.3).
+    """
+    core = repo_root / config.standards.core
+    domain = repo_root / config.standards.domain
+    if not core.is_file():
+        core = _STANDARDS_DEFAULTS_DIR / "core.standards.yml"
+    if not domain.is_file():
+        domain = _STANDARDS_DEFAULTS_DIR / "domain.standards.yml"
+    return core, domain
 
 
 def run_review(
@@ -44,16 +60,14 @@ def run_review(
     prompt_version: str = "v3",
     no_llm: bool = False,
     provider: str | None = None,
+    evidence_policy: str | None = None,
     branch_source: tuple[str, str] | None = None,
     as_json: bool = False,
 ) -> ReviewOutcome:
     """Run the full review pipeline, write JSON+MD reports, return the outcome."""
     if config.egress != "raw":
         raise click.UsageError(f"egress={config.egress!r} is not implemented yet (F0.3)")
-    if config.evidence_policy != "degrade":
-        raise click.UsageError(
-            f"evidence_policy={config.evidence_policy!r} is not implemented yet (F0.4)"
-        )
+    resolved_evidence_policy = evidence_policy or config.evidence_policy
 
     provider_name = provider or config.provider
 
@@ -64,22 +78,27 @@ def run_review(
 
     review: dict[str, Any]
     metadata: dict[str, Any]
+    review_complete: bool = True
 
     if secret_findings:
         review = _blocked_review(secret_findings, note=FIREWALL_SKIP_NOTE, anchor_to_diff=True)
         llm_layer = "skipped:secret_detected"
         metadata = {}
     elif no_llm:
-        review = filter_findings(
-            {"findings": [], "summary": "LLM review skipped (--no-llm)."}, diff
-        )
+        review = {"findings": [], "summary": "LLM review skipped (--no-llm).", "filtered_out": []}
         llm_layer = "skipped:--no-llm"
-        metadata = review.pop("metadata", {})
+        metadata = {}
     elif provider_name != "openai":
         raise click.UsageError(f"provider {provider_name!r} is not implemented yet (F0.3)")
     else:
         try:
-            context = build_context(diff, repo_root, config.context_files)
+            core_path, domain_path = _standards_paths(repo_root, config)
+            registry = load_registry(core_path, domain_path)
+        except RegistryError as exc:
+            raise InconclusiveError(str(exc)) from exc
+        rules_block = render_rules_block(registry.llm_rules())
+        try:
+            context = build_context(diff, repo_root, config.context_files, rules_block)
             if description is not None:
                 context = _append_description(context, description)
         except ContextPackError as exc:
@@ -129,8 +148,30 @@ def run_review(
                 llm_layer = "skipped:no_provider_key"
             except LLMReviewError as exc:
                 raise InconclusiveError(str(exc)) from exc
-            review = filter_findings(raw_review, diff)
-            metadata = review.pop("metadata", {})
+            metadata = raw_review.pop("metadata", {})
+            validation = validate_findings(
+                raw_review["findings"],
+                registry=registry,
+                diff=diff,
+                evidence_policy=resolved_evidence_policy,
+            )
+            # F0.3 seam (spec §5.3): once review/deterministic.py exists, prepend its
+            # findings here -- `merge_findings(deterministic_findings + validation.findings)`
+            # -- so a tie against an equal-strength LLM duplicate favors the deterministic
+            # finding (postfilter.merge_findings keeps the first-seen item on a tie).
+            review = {
+                "findings": merge_findings(validation.findings),
+                "summary": raw_review.get("summary", ""),
+                "filtered_out": validation.filtered_out,
+            }
+            review_complete = validation.review_complete
+            if not review_complete:
+                reasons = "/".join(sorted(validation.invalidated_reasons))
+                review["note"] = (
+                    f"LLM review invalidated: {validation.invalid_count} of "
+                    f"{validation.total_count} findings failed validation ({reasons}); "
+                    "response discarded (fail_closed)."
+                )
 
     secrets_layer = "fail" if secret_findings else "pass"
 
@@ -161,7 +202,7 @@ def run_review(
         "temperature": temperature,
         "gate_commit": gate_commit,
     }
-    verdict_name, exit_code = verdict(review["findings"])
+    verdict_name, exit_code = verdict(review["findings"], review_complete=review_complete)
     review["verdict"] = verdict_name
 
     json_report = build_json_report(
@@ -174,7 +215,7 @@ def run_review(
         },
         egress={"mode": config.egress, "context_files": list(config.context_files)},
         source=source,
-        review_complete=True,
+        review_complete=review_complete,
         meta_extra={
             "prompt_version": prompt_version,
             "provider": provider_name,
@@ -219,8 +260,10 @@ def _blocked_review(
     for finding in secret_findings:
         finding = {**finding, "evidence_verified": True}
         if not anchor_to_diff:
-            finding["file"] = "<review context: context_files or --description>"
-            finding["line"] = None
+            finding["path"] = "<review context: context_files or --description>"
+            finding["side"] = None
+            finding["line_start"] = None
+            finding["line_end"] = None
         findings.append(finding)
     return {
         "findings": findings,

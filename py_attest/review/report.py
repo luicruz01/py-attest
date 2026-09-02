@@ -127,7 +127,7 @@ def build_json_report(
     meta_extra: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble the schema_version 3 JSON report (TRD §4.3) from an internal review result."""
-    verdict_name, exit_code = verdict(review["findings"])
+    verdict_name, exit_code = verdict(review["findings"], review_complete=review_complete)
     report = {
         "schema_version": 3,
         "verdict": verdict_name,

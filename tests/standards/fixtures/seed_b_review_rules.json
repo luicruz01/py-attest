@@ -1,0 +1,113 @@
+{
+  "schema_version": "1.0",
+  "rules": [
+    {
+      "rule_id": "EXTERNAL_INPUT_VALIDATION",
+      "section": "1. Code quality",
+      "title": "Validate all external input",
+      "description": "External input must be validated before it is used by application logic.",
+      "severity": "S2",
+      "evidence_required": "Require a changed input boundary or changed consumption of external input and a concrete value or type that bypasses validation or produces an unhandled failure. Anchor the finding on the changed validation or consumption line.",
+      "non_examples": ["Typed FastAPI parameters whose framework validation rejects malformed values before application logic runs.", "A hypothetical malformed value with no externally reachable input path.", "Validation inherited from the base branch that the patch neither changes nor exposes."]
+    },
+    {
+      "rule_id": "EXPLICIT_ERROR_HANDLING",
+      "section": "1. Code quality",
+      "title": "Handle errors explicitly",
+      "description": "Known failure modes must be handled explicitly, and exceptions must not be silently swallowed.",
+      "severity": "S2",
+      "evidence_required": "Apply when a changed line creates or exposes a reproducible unhandled error at an application boundary, or when changed code silently discards an exception. Do not infer an error without a reachable failure mode.",
+      "non_examples": ["An exception deliberately converted to an explicit HTTP error.", "A failure wholly inside unchanged code and unrelated to the patch.", "A preference for a different exception type when behavior remains correct."]
+    },
+    {
+      "rule_id": "TODO_TICKET_REFERENCE",
+      "section": "1. Code quality",
+      "title": "Reference a ticket in TODOs",
+      "description": "A TODO introduced by a patch must include a ticket reference.",
+      "severity": "S3",
+      "evidence_required": "Apply only to a TODO added by the patch that has no recognizable ticket or issue reference in the comment or immediate context.",
+      "non_examples": ["A TODO with an issue key or URL.", "An inherited TODO not touched or exposed by the patch.", "A normal explanatory comment that does not defer work."]
+    },
+    {
+      "rule_id": "LOG_PII",
+      "section": "3. PII and logging",
+      "title": "Do not write PII to logs",
+      "description": "Logging must not contain full_name, email, birthdate, or other PII directly or indirectly; app.privacy.redact() must be used.",
+      "severity": "S1",
+      "evidence_required": "Trace changed logger arguments through directly invoked helpers or serialization. Require evidence that a classified PII field reaches a log sink without effective redaction. Note when known fixtures include minors because that aggravates severity but is not a second root cause.",
+      "non_examples": ["Logging a payload after app.privacy.redact() removes or masks every PII field.", "Logging identifiers not classified as PII by TEAM-STANDARDS.md without other evidence.", "A helper that contains PII but is not connected to a log sink by the patch."]
+    },
+    {
+      "rule_id": "MINOR_DATA_EGRESS",
+      "section": "3. PII and logging",
+      "title": "Control egress of minors' data",
+      "description": "Data belonging to minors must not leave the service without minimization and a documented legal basis.",
+      "severity": "S1",
+      "evidence_required": "Require a changed, reachable egress path to analytics, support tooling, or another third party; evidence that the payload can contain minors' data; missing minimization; and no documented legal basis. An internal data structure alone is not proof that data leaves the service.",
+      "non_examples": ["An in-process collection with no demonstrated external consumer or transmission path.", "Minimized non-PII metrics sent under a documented legal basis.", "Adult-only data where the code enforces the exclusion of minors."]
+    },
+    {
+      "rule_id": "DATASET_RETENTION_DECLARED",
+      "section": "4. Data retention",
+      "title": "Declare retention for every dataset",
+      "description": "Every newly persisted or copied dataset must declare its retention category in app.privacy.RETENTION_DAYS.",
+      "severity_policy": {"minor_data": "S1", "minors_demonstrably_excluded": "human_classification_required_based_on_impact"},
+      "evidence_required": "This rule is mandatory for every dataset newly persisted or copied by the patch. Verify that a corresponding retention category is declared. Classify as S1 when the dataset contains minors' data. If minors are demonstrably excluded, require human severity classification based on impact.",
+      "non_examples": ["A transient local value that is neither persisted nor copied as a dataset.", "A new dataset with a matching category in app.privacy.RETENTION_DAYS.", "An unchanged dataset whose retention is outside the patch's scope."]
+    },
+    {
+      "rule_id": "MINOR_RETENTION_MAX_90_DAYS",
+      "section": "4. Data retention",
+      "title": "Limit retention of minors' data to 90 days",
+      "description": "Minors' data must not be retained longer than 90 days unless the pull request documents a legal basis.",
+      "severity": "S1",
+      "evidence_required": "Require evidence that the changed dataset can contain minors' data and that its declared or described retention exceeds 90 days. Check the pull-request material for a documented legal basis before applying.",
+      "non_examples": ["A dataset that enforces deletion at or before 90 days.", "A longer period supported by a legal basis documented in the pull request.", "A dataset whose code provably excludes minors."]
+    },
+    {
+      "rule_id": "SECONDARY_PII_MINIMIZATION",
+      "section": "4. Data retention",
+      "title": "Minimize secondary copies of personal data",
+      "description": "Secondary copies of personal data require a defined purpose and retention period and must contain only data needed for that purpose.",
+      "severity": "S1",
+      "evidence_required": "Require a newly copied personal-data field and compare it with the stated purpose. Apply S1 when minors' data is involved and the copy lacks purpose, compliant retention, or minimization. Do not split multiple fields from the same overbroad copy into duplicate findings.",
+      "non_examples": ["A purpose-limited copy containing only fields demonstrably needed for that purpose and a compliant retention period.", "A non-personal aggregate that cannot be tied back to a person.", "Merely passing an object within one call without creating a secondary copy."]
+    },
+    {
+      "rule_id": "COMMITTED_SECRET",
+      "section": "5. Secrets",
+      "title": "Do not commit secrets",
+      "description": "Secrets must be supplied only through environment variables and never stored in the repository.",
+      "severity": "S1",
+      "evidence_required": "Require a changed value that is a credential, token, or secret rather than a clearly marked non-secret example. A concrete provider-key value assigned to an API-key variable is sufficient repository evidence; do not attempt to authenticate with it.",
+      "non_examples": ["Reading an environment variable without a committed fallback secret.", "A clearly non-secret placeholder such as SENDGRID_API_KEY=example in documentation.", "A public identifier that grants no access."]
+    },
+    {
+      "rule_id": "LOGIC_TEST_REQUIRED",
+      "section": "2. Testing",
+      "title": "Test every logic change",
+      "description": "Every logic change must include a test capable of failing when the changed behavior regresses.",
+      "severity": "S2",
+      "evidence_required": "Identify the changed logic line, the behavior it introduces, and the absence of a test that would fail if that behavior were removed or broken. Use the changed logic line as the finding anchor. Apply blocking severity to core logic as defined by section 6; use uncertainty for scaffolding or non-core operational code.",
+      "non_examples": ["A documentation-only change.", "A test that exercises and asserts the changed business result.", "Demanding coverage for unrelated inherited behavior."]
+    },
+    {
+      "rule_id": "TESTS_EFFECTIVE",
+      "section": "2. Testing",
+      "title": "Require regression-sensitive tests",
+      "description": "Tests count only when their assertions detect regressions in the business behavior, including relevant edge cases.",
+      "severity": "S2",
+      "evidence_required": "Demonstrate that the included assertions still pass for a concrete broken implementation or that they never assert the changed business result. Anchor the finding on the changed logic that lacks effective coverage and explain the uncovered case.",
+      "non_examples": ["An assertion of an exact business result for a representative case.", "A focused unit test that isolates dependencies but executes the relevant logic.", "A missing test for behavior not changed or exposed by the patch."]
+    },
+    {
+      "rule_id": "INCORRECT_DATA_LOGIC",
+      "section": "6. Review severities",
+      "title": "Block logic that produces incorrect data",
+      "description": "A reproducible logic defect that produces incorrect data is an S2 merge blocker.",
+      "severity": "S2",
+      "evidence_required": "Require a changed line, a reproducible input, an expected result supported by TEAM-STANDARDS.md or unequivocal existing behavior, and an actual incorrect result. If the expected business result is reasonably ambiguous, record an uncertainty instead.",
+      "non_examples": ["A rounding preference with no authoritative expected behavior.", "A hypothetical failure without a reachable input.", "Incorrect data produced only by unrelated inherited code."]
+    }
+  ]
+}

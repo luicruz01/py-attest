@@ -1,0 +1,111 @@
+version: 1
+sections:
+- slug: code-quality
+  title: Code quality
+  rules:
+  - id: code-quality-1
+    title: ruff check passes
+    severity: S3
+    mode: deterministic
+    check: ruff-check
+    description: ruff check must report no violations.
+  - id: code-quality-2
+    title: ruff format passes
+    severity: S3
+    mode: deterministic
+    check: ruff-format
+    description: ruff format --check must report no files needing reformatting.
+  - id: code-quality-3
+    title: Validate all external input
+    mode: llm
+    description: External input must be validated before it is used by application logic.
+    evidence_required: Require a changed input boundary or changed consumption of external input and a
+      concrete value or type that bypasses validation or produces an unhandled failure. Anchor the finding
+      on the changed validation or consumption line.
+    non_examples:
+    - Typed FastAPI parameters whose framework validation rejects malformed values before application
+      logic runs.
+    - A hypothetical malformed value with no externally reachable input path.
+    - Validation inherited from the base branch that the patch neither changes nor exposes.
+    severity: S2
+  - id: code-quality-4
+    title: Handle errors explicitly
+    mode: llm
+    description: Known failure modes must be handled explicitly, and exceptions must not be silently swallowed.
+    evidence_required: Apply when a changed line creates or exposes a reproducible unhandled error at
+      an application boundary, or when changed code silently discards an exception. Do not infer an error
+      without a reachable failure mode.
+    non_examples:
+    - An exception deliberately converted to an explicit HTTP error.
+    - A failure wholly inside unchanged code and unrelated to the patch.
+    - A preference for a different exception type when behavior remains correct.
+    severity: S2
+  - id: code-quality-5
+    title: Reference a ticket in TODOs
+    mode: deterministic
+    description: A TODO introduced by a patch must include a ticket reference.
+    evidence_required: Apply only to a TODO added by the patch that has no recognizable ticket or issue
+      reference in the comment or immediate context.
+    non_examples:
+    - A TODO with an issue key or URL.
+    - An inherited TODO not touched or exposed by the patch.
+    - A normal explanatory comment that does not defer work.
+    severity: S3
+    check: todo-ticket-ref
+  - id: code-quality-6
+    title: Block logic that produces incorrect data
+    mode: llm
+    description: A reproducible logic defect that produces incorrect data is an S2 merge blocker.
+    evidence_required: Require a changed line, a reproducible input, an expected result supported by TEAM-STANDARDS.md
+      or unequivocal existing behavior, and an actual incorrect result. If the expected business result
+      is reasonably ambiguous, record an uncertainty instead.
+    non_examples:
+    - A rounding preference with no authoritative expected behavior.
+    - A hypothetical failure without a reachable input.
+    - Incorrect data produced only by unrelated inherited code.
+    severity: S2
+- slug: testing
+  title: Testing
+  rules:
+  - id: testing-1
+    title: Untested core logic fails CI
+    severity: S2
+    mode: deterministic
+    check: coverage-gate
+    description: Every logic change includes tests that fail if the behavior breaks, enforced by the coverage
+      gate.
+  - id: testing-2
+    title: Test every logic change
+    mode: llm
+    description: Every logic change must include a test capable of failing when the changed behavior regresses.
+    evidence_required: Identify the changed logic line, the behavior it introduces, and the absence of
+      a test that would fail if that behavior were removed or broken. Use the changed logic line as the
+      finding anchor. Apply blocking severity to core logic as defined by section 6; use uncertainty for
+      scaffolding or non-core operational code.
+    non_examples:
+    - A documentation-only change.
+    - A test that exercises and asserts the changed business result.
+    - Demanding coverage for unrelated inherited behavior.
+    severity: S2
+  - id: testing-3
+    title: Require regression-sensitive tests
+    mode: llm
+    description: Tests count only when their assertions detect regressions in the business behavior, including
+      relevant edge cases.
+    evidence_required: Demonstrate that the included assertions still pass for a concrete broken implementation
+      or that they never assert the changed business result. Anchor the finding on the changed logic that
+      lacks effective coverage and explain the uncovered case.
+    non_examples:
+    - An assertion of an exact business result for a representative case.
+    - A focused unit test that isolates dependencies but executes the relevant logic.
+    - A missing test for behavior not changed or exposed by the patch.
+    severity: S2
+- slug: secrets
+  title: Secrets
+  rules:
+  - id: secrets-1
+    title: No committed secrets
+    severity: S1
+    mode: deterministic
+    check: gitleaks
+    description: Secrets are provided through environment variables only, never committed to the repository.

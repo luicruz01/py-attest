@@ -1,0 +1,14 @@
+{
+  "COMMITTED_SECRET": "secrets-1",
+  "DATASET_RETENTION_DECLARED": "retention-1",
+  "EXPLICIT_ERROR_HANDLING": "code-quality-4",
+  "EXTERNAL_INPUT_VALIDATION": "code-quality-3",
+  "INCORRECT_DATA_LOGIC": "code-quality-6",
+  "LOGIC_TEST_REQUIRED": "testing-2",
+  "LOG_PII": "pii-1",
+  "MINOR_DATA_EGRESS": "pii-2",
+  "MINOR_RETENTION_MAX_90_DAYS": "retention-2",
+  "SECONDARY_PII_MINIMIZATION": "retention-3",
+  "TESTS_EFFECTIVE": "testing-3",
+  "TODO_TICKET_REFERENCE": "code-quality-5"
+}

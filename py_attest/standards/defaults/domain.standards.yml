@@ -1,0 +1,76 @@
+version: 1
+sections:
+- slug: pii
+  title: PII and logging (example -- edit or delete this section)
+  rules:
+  - id: pii-1
+    title: Do not write PII to logs
+    mode: llm
+    description: Logging must not contain full_name, email, birthdate, or other PII directly or indirectly;
+      app.privacy.redact() must be used.
+    evidence_required: Trace changed logger arguments through directly invoked helpers or serialization.
+      Require evidence that a classified PII field reaches a log sink without effective redaction. Note
+      when known fixtures include minors because that aggravates severity but is not a second root cause.
+    non_examples:
+    - Logging a payload after app.privacy.redact() removes or masks every PII field.
+    - Logging identifiers not classified as PII by TEAM-STANDARDS.md without other evidence.
+    - A helper that contains PII but is not connected to a log sink by the patch.
+    severity: S1
+  - id: pii-2
+    title: Control egress of minors' data
+    mode: llm
+    description: Data belonging to minors must not leave the service without minimization and a documented
+      legal basis.
+    evidence_required: Require a changed, reachable egress path to analytics, support tooling, or another
+      third party; evidence that the payload can contain minors' data; missing minimization; and no documented
+      legal basis. An internal data structure alone is not proof that data leaves the service.
+    non_examples:
+    - An in-process collection with no demonstrated external consumer or transmission path.
+    - Minimized non-PII metrics sent under a documented legal basis.
+    - Adult-only data where the code enforces the exclusion of minors.
+    severity: S1
+- slug: retention
+  title: Data retention (example -- edit or delete this section)
+  rules:
+  - id: retention-1
+    title: Declare retention for every dataset
+    mode: llm
+    description: Every newly persisted or copied dataset must declare its retention category in app.privacy.RETENTION_DAYS.
+    evidence_required: This rule is mandatory for every dataset newly persisted or copied by the patch.
+      Verify that a corresponding retention category is declared. Classify as S1 when the dataset contains
+      minors' data. If minors are demonstrably excluded, require human severity classification based on
+      impact.
+    non_examples:
+    - A transient local value that is neither persisted nor copied as a dataset.
+    - A new dataset with a matching category in app.privacy.RETENTION_DAYS.
+    - An unchanged dataset whose retention is outside the patch's scope.
+    severity_policy:
+      minor_data: S1
+      minors_demonstrably_excluded: human_classification_required_based_on_impact
+  - id: retention-2
+    title: Limit retention of minors' data to 90 days
+    mode: llm
+    description: Minors' data must not be retained longer than 90 days unless the pull request documents
+      a legal basis.
+    evidence_required: Require evidence that the changed dataset can contain minors' data and that its
+      declared or described retention exceeds 90 days. Check the pull-request material for a documented
+      legal basis before applying.
+    non_examples:
+    - A dataset that enforces deletion at or before 90 days.
+    - A longer period supported by a legal basis documented in the pull request.
+    - A dataset whose code provably excludes minors.
+    severity: S1
+  - id: retention-3
+    title: Minimize secondary copies of personal data
+    mode: llm
+    description: Secondary copies of personal data require a defined purpose and retention period and
+      must contain only data needed for that purpose.
+    evidence_required: Require a newly copied personal-data field and compare it with the stated purpose.
+      Apply S1 when minors' data is involved and the copy lacks purpose, compliant retention, or minimization.
+      Do not split multiple fields from the same overbroad copy into duplicate findings.
+    non_examples:
+    - A purpose-limited copy containing only fields demonstrably needed for that purpose and a compliant
+      retention period.
+    - A non-personal aggregate that cannot be tied back to a person.
+    - Merely passing an object within one call without creating a secondary copy.
+    severity: S1

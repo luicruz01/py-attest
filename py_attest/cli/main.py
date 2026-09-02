@@ -7,6 +7,9 @@ import click
 from py_attest import __version__
 from py_attest.check.runner import CheckExecutionError, run_check
 from py_attest.config import Config, load_config
+from py_attest.doctor.check import DoctorContext
+from py_attest.doctor.report import to_json, to_markdown
+from py_attest.doctor.runner import run_doctor
 from py_attest.errors import (
     AttestError,
     BlockedError,
@@ -240,9 +243,33 @@ def gate(
 
 
 @cli.command()
-def doctor() -> None:
-    """Report the registered check catalog and environment diagnostics."""
-    click.echo("no checks registered")
+@click.argument("path", required=False, type=click.Path())
+@click.option("--strict", is_flag=True, help="Exit 2 if any S1 check fails.")
+@click.option("--compat", is_flag=True, help="Restrict to the ADR-003 compat_* checks.")
+@click.option("--offline", is_flag=True, help="Skip network-dependent checks (none yet).")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--only", help="Comma-separated check ids to run instead of the full set.")
+def doctor(
+    path: str | None,
+    strict: bool,
+    compat: bool,
+    offline: bool,
+    as_json: bool,
+    only: str | None,
+) -> int:
+    """Audit a repo against the standards registry and the ADR-003 compat contract."""
+    target = Path(path) if path else Path.cwd()
+    only_ids = {check_id.strip() for check_id in only.split(",")} if only else None
+    ctx = DoctorContext(repo_root=target, offline=offline, config=load_config(target))
+
+    report = run_doctor(ctx, only=only_ids, compat=compat, strict=strict)
+
+    if as_json:
+        click.echo(json.dumps(to_json(report), indent=2))
+    else:
+        click.echo(to_markdown(report))
+
+    return 2 if report.blocked else 0
 
 
 @cli.command()

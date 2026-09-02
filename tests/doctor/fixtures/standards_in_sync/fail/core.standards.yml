@@ -1,0 +1,12 @@
+version: 1
+sections:
+  - slug: testing
+    title: Testing
+    rules:
+      - id: testing-1
+        title: Untested core logic fails CI
+        severity: S2
+        mode: deterministic
+        check: coverage-gate
+        description: >
+          Every logic change includes tests that fail if the behavior breaks.

@@ -3353,10 +3353,7 @@ def build(config: Config, check: bool) -> int:
     core = repo_root / config.standards.core
     domain = repo_root / config.standards.domain
     output = repo_root / config.standards.output
-    try:
-        build_standards(core, domain, output, check=check)
-    except StandardsDriftError as exc:
-        raise exc
+    build_standards(core, domain, output, check=check)
     click.echo(f"wrote {output}" if not check else f"{output} is up to date")
     return 0
 
@@ -3375,7 +3372,7 @@ def lint(config: Config) -> int:
     return 0
 ```
 
-Note `build`'s `except StandardsDriftError as exc: raise exc` — this looks redundant (re-raising the same exception) but is deliberate: it makes the propagation point explicit at the call site for a reader scanning this function, matching how every other command in this file surfaces its domain error to `AttestGroup.main`'s catch-all `except AttestError`. `AttestGroup.main` (unchanged) already catches any `AttestError` subclass and calls `exit_code_for` on it — `StandardsDriftError` reaching that handler is what triggers exit 2.
+`build_standards(...)` raises `StandardsDriftError` directly on drift; nothing in this command needs to catch it — `AttestGroup.main` (unchanged) already catches any `AttestError` subclass around the whole CLI invocation and calls `exit_code_for` on it, which is what turns `StandardsDriftError` into exit 2. (Corrected during the SDD pre-flight scan: an earlier draft of this task added a pointless `except StandardsDriftError as exc: raise exc` around the call — pure re-raise, no behavior difference, just noise a reviewer would flag. Removed.)
 
 - [ ] **Step 5: Run to verify pass**
 

@@ -56,3 +56,13 @@ def test_lint_reports_every_unknown_check_id_not_just_the_first(tmp_path: Path) 
     errors = lint(core, domain)
 
     assert {error.message.split(": ")[0] for error in errors} == {"code-quality-1", "testing-1"}
+
+
+def test_lint_handles_nonexistent_core_file_without_raising(tmp_path: Path) -> None:
+    core = tmp_path / "nonexistent.yml"
+    domain = _write(tmp_path, "domain.standards.yml", DOMAIN_YAML)
+
+    errors = lint(core, domain)
+
+    assert len(errors) == 1
+    assert "cannot read file" in errors[0].message

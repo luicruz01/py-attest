@@ -50,6 +50,8 @@ def _load_document(path: Path) -> dict[str, Any]:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise RegistryError(f"{path}: invalid YAML: {exc}") from exc
+    except OSError as exc:
+        raise RegistryError(f"{path}: cannot read file: {exc}") from exc
     if not isinstance(raw, dict):
         raise RegistryError(f"{path}: document must be a mapping")
     try:

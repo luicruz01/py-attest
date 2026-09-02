@@ -146,3 +146,11 @@ def test_invalid_core_yaml_is_rejected(tmp_path: Path, core_yaml: str, case_id: 
 
     with pytest.raises(RegistryError, match="schema violation"):
         load_registry(core, domain)
+
+
+def test_nonexistent_core_file_raises_registryerror(tmp_path: Path) -> None:
+    core = tmp_path / "nonexistent.yml"
+    domain = _write(tmp_path, "domain.standards.yml", DOMAIN_YAML)
+
+    with pytest.raises(RegistryError, match="cannot read file"):
+        load_registry(core, domain)

@@ -1,0 +1,14 @@
+version: 1
+sections:
+  - slug: pii
+    title: "PII and logging"
+    rules:
+      # Duplicate of core.standards.yml's testing-1 -- IDs must be unique globally
+      # across core + domain (ADR-001). This fixture exercises that failure.
+      - id: testing-1
+        title: PII must not reach logs
+        severity: S1
+        mode: llm
+        description: >
+          PII (full_name, email, birthdate) must not be written to logs,
+          directly or indirectly. Use app.privacy.redact().

@@ -1,0 +1,12 @@
+version: 1
+sections:
+  - slug: pii
+    title: "PII and logging"
+    rules:
+      - id: pii-1
+        title: PII must not reach logs
+        severity: S1
+        mode: llm
+        description: >
+          PII (full_name, email, birthdate) must not be written to logs,
+          directly or indirectly. Use app.privacy.redact().

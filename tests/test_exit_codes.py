@@ -68,7 +68,7 @@ def test_attest_error_in_dispatch_exits_with_its_mapped_code(
     assert result.exit_code == expected_exit_code
 
 
-def test_doctor_exits_zero_with_no_checks_registered(
+def test_doctor_exits_zero_on_a_repo_with_no_applicable_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -77,7 +77,7 @@ def test_doctor_exits_zero_with_no_checks_registered(
     result = runner.invoke(cli, ["doctor"])
 
     assert result.exit_code == 0
-    assert "no checks registered" in result.output
+    assert "compat_engine_range" in result.output
 
 
 def test_gate_without_branch_is_a_usage_error(

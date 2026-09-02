@@ -181,7 +181,33 @@ Click devuelve 2 en errores de uso: `main.py` los captura → 64.
 
 Nunca se incluyen: el patch original, la respuesta cruda del proveedor, el mapa de alias, prompts, stack traces (B). `ReviewResult.from_json` lee `schema_version` 1.0/2.0 de B para el eval histórico; siempre escribe 3.
 
-### 4.4 Schema del doctor — sin cambios (v0.1 §4.4).
+### 4.4 Schema del doctor (JSON, `schema_version: 1`)
+
+El texto de v0.1 §4.4 no es recuperable (ver nota en §6): este schema se definió al implementar
+`py_attest/doctor/` (WP `wp/doctor-compat`), no se recuperó de una versión previa.
+
+```jsonc
+{
+  "schema_version": 1,
+  "target": "/path/to/repo",                  // ctx.repo_root, tal como se pasó a `attest doctor`
+  "strict": false,
+  "compat": false,
+  "checks": [{
+    "id": "compat_engine_range",               // id estable del check (snake_case)
+    "severity": "S1",                          // S1 | S2 | S3 -- fija por check, nunca por el modelo
+    "status": "fail",                          // pass | fail | skip | error
+    "message": "installed py-attest 0.0.0 is outside attest_engine_range >=97,<98",
+    "remedy": "pip install -U \"py-attest>=97,<98\"",   // null si no aplica (pass/skip, o error sin remedio conocido)
+    "rule_id": null                            // id de standards.yml si el check referencia una regla; null si no
+  }],
+  "summary": {"pass": 0, "fail": 1, "skip": 0, "error": 1},
+  "meta": {"engine_version": "0.0.0", "generated_at": "2026-09-02T05:11:16.649641+00:00"}
+}
+```
+
+Exit codes: `0` si no hay `--strict`, o con `--strict` y ningún check `severity=S1` en estado
+`fail`/`error`; `2` con `--strict` y al menos un `S1` en `fail`/`error` (TRD §4.1). `doctor` nunca
+sale con `3` -- ese código es de `attest upgrade` (ADR-003 §4), no de `doctor` en sí.
 
 ## 5. Pipeline en dos etapas — detalle y degradaciones
 
@@ -211,6 +237,12 @@ Aprobación (exit 0 con `APPROVE`) requiere, como en B: adquisición completa, s
 ## 6. Catálogo v1 de checks del doctor
 
 Sin cambios respecto a v0.1 §6, con tres adiciones: `egress-mode-advised` (S3: recomienda `minimized` si `domain.standards.yml` tiene reglas S1 de PII y `egress = raw`), `context-files-sensitive` (S2: un `context_file` coincide con patrones de secretos/PII), `workflow-boundaries` (S1: el workflow generado no ejecuta código en el job `pull_request_target` — reutiliza los asserts de B `test_workflow_security.py`).
+
+El catálogo base de v0.1 (los ~11 checks más allá de los cuatro implementados en `wp/doctor-compat`:
+`standards_valid`, `standards_in_sync`, `compat_engine_range`, `compat_pin_consistent`) tampoco es
+recuperable — no es solo difícil de encontrar en este repo, se confirmó que no existe en ningún
+archivo. Quien retome el resto del catálogo en F2 debe autorizarlo de cero contra R9 (PRD §7) y el
+`check`/`review` ya implementados, no buscar un documento que no existe.
 
 ## 7. Template `py-attest-template`
 

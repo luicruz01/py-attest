@@ -1,0 +1,19 @@
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)venv/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.mypy_cache/''',
+  '''(^|/)\.ruff_cache/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.tox/''',
+  '''(^|/)\.eggs/''',
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''\.egg-info/''',
+]

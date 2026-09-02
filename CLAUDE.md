@@ -20,9 +20,11 @@ Companion template: github.com/luicruz01/py-attest-template (created after v1.0.
 - One work package per branch (`wp/f0.3`). Prompts and DoD per work package: `docs/plan-cc.md` §4 and §6.
 - TDD: tests first. The tests migrated from the seed are the safety net for phase F0.
 - `uv sync --all-extras && uv run pytest` before every commit. `ruff check` and `ruff format --check` must pass.
-- If `uv run pytest`/`uv run attest` fails with `ModuleNotFoundError: No module named 'py_attest'`, the
-  editable install broke (a concurrent `uv` command from another session on this repo, or a stray system
-  Python). Fix: `uv sync --reinstall-package py-attest`. `.python-version` pins the interpreter.
+- If `uv run pytest`/`uv run attest` fails with `ModuleNotFoundError: No module named 'py_attest'` (or
+  for a missing extras-only dependency, e.g. `openai`), the editable install broke (a
+  concurrent `uv` command from another session on this repo, or a stray system Python). Fix:
+  `uv sync --all-extras` — plain `uv sync --reinstall-package py-attest` drops the extras and leaves the
+  same error. `.python-version` pins the interpreter.
 - No telemetry. No network calls except the configured LLM provider (and git/PyPI/GitHub on explicit user action).
 - API keys only from environment variables. Never in files, never in fixtures.
 - Provider tests use recorded fixtures; nothing in the PR test suite touches the network.

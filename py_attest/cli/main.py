@@ -1,10 +1,15 @@
+import json
 import sys
+from pathlib import Path
 
 import click
 
 from py_attest import __version__
-from py_attest.config import load_config
+from py_attest.check.runner import CheckExecutionError, run_check
+from py_attest.config import Config, load_config
 from py_attest.errors import AttestError, BlockedError, IncompatibleError, InconclusiveError
+from py_attest.review.diff import DiffError, _branch_diff
+from py_attest.review.reviewer import run_review
 
 
 def exit_code_for(exc: BaseException) -> int:
@@ -52,16 +57,28 @@ def cli(ctx: click.Context) -> None:
 @click.option("--no-tests", is_flag=True)
 @click.option("--no-lint", is_flag=True)
 @click.option("--json", "as_json", is_flag=True)
-def check(path: str | None, no_tests: bool, no_lint: bool, as_json: bool) -> None:
+def check(path: str | None, no_tests: bool, no_lint: bool, as_json: bool) -> int:
     """Run deterministic checks (ruff, pytest+cov, gitleaks) against the repo."""
-    click.echo("check: not implemented yet")
+    target = Path(path) if path else Path.cwd()
+    try:
+        result = run_check(path=target, no_tests=no_tests, no_lint=no_lint)
+    except CheckExecutionError as exc:
+        raise InconclusiveError(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"Verdict: {result['verdict']}")
+        for finding in result["findings"]:
+            click.echo(f"- [{finding['severity']}] {finding['rule']}: {finding['title']}")
+    return result["exit_code"]
 
 
 @cli.command()
 @click.option("--branch")
 @click.option("--base")
 @click.option("--head")
-@click.option("--diff-file", type=click.Path())
+@click.option("--diff-file", type=click.Path(exists=True))
 @click.option("--provider", type=click.Choice(["fake", "openai", "anthropic"]))
 @click.option("--fake-response")
 @click.option("--egress", type=click.Choice(["raw", "minimized"]))
@@ -69,7 +86,10 @@ def check(path: str | None, no_tests: bool, no_lint: bool, as_json: bool) -> Non
 @click.option("--out", type=click.Path())
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--prompt-version")
+@click.option("--no-llm", is_flag=True)
+@click.pass_obj
 def review(
+    config: Config,
     branch: str | None,
     base: str | None,
     head: str | None,
@@ -81,11 +101,48 @@ def review(
     out: str | None,
     as_json: bool,
     prompt_version: str | None,
-) -> None:
+    no_llm: bool,
+) -> int:
     """Run the LLM-backed review over a diff. Never executes repo code."""
-    if not any([branch, base, head, diff_file]):
-        raise click.UsageError("review requires one of --branch, --base, --head, or --diff-file")
-    click.echo("review: not implemented yet")
+    if not any([branch, head, diff_file]):
+        raise click.UsageError("review requires one of --branch, --head, or --diff-file")
+    if head:
+        raise click.UsageError("--head is not implemented yet (F0.3, ADR-004 bounded acquisition)")
+    if fake_response:
+        raise click.UsageError("--fake-response is not implemented yet (F0.3, fake provider)")
+    if egress and egress != "raw":
+        raise click.UsageError(f"egress={egress!r} is not implemented yet (F0.3)")
+
+    repo_root = Path.cwd()
+    branch_source = None
+    if diff_file:
+        diff_path = Path(diff_file)
+        diff = diff_path.read_text(encoding="utf-8")
+        source_name = diff_path.name
+    else:
+        base_ref = base or config.base_branch
+        try:
+            diff = _branch_diff(repo_root, base_ref, branch)
+        except DiffError as exc:
+            raise InconclusiveError(str(exc)) from exc
+        source_name = branch
+        branch_source = (base_ref, branch)
+
+    out_dir = Path(out) if out else Path(config.reports_dir)
+    outcome = run_review(
+        diff=diff,
+        source_name=source_name,
+        repo_root=repo_root,
+        config=config,
+        out_dir=out_dir,
+        description=description,
+        prompt_version=prompt_version or "v3",
+        no_llm=no_llm,
+        provider=provider,
+        branch_source=branch_source,
+        as_json=as_json,
+    )
+    return outcome.exit_code
 
 
 @cli.command()
@@ -93,9 +150,77 @@ def review(
 @click.option("--base")
 @click.option("--out", type=click.Path())
 @click.option("--no-llm", is_flag=True)
-def gate(branch: str, base: str | None, out: str | None, no_llm: bool) -> None:
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_obj
+def gate(
+    config: Config,
+    branch: str,
+    base: str | None,
+    out: str | None,
+    no_llm: bool,
+    as_json: bool,
+) -> int:
     """Run check + review over base...branch; exit code is the max of both."""
-    click.echo("gate: not implemented yet")
+    repo_root = Path.cwd()
+
+    try:
+        check_result = run_check(path=repo_root)
+    except CheckExecutionError as exc:
+        raise InconclusiveError(str(exc)) from exc
+
+    check_exit = check_result["exit_code"]
+    if check_exit != 0:
+        # check failed or blocked: don't spend LLM budget or expose secrets on a broken tree.
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "stage": "gate",
+                        "exit_code": check_exit,
+                        "check": check_result,
+                        "review": None,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            click.echo(
+                f"check verdict: {check_result['verdict']} (exit {check_exit}); skipping review"
+            )
+        return check_exit
+
+    base_ref = base or config.base_branch
+    try:
+        diff = _branch_diff(repo_root, base_ref, branch)
+    except DiffError as exc:
+        raise InconclusiveError(str(exc)) from exc
+
+    out_dir = Path(out) if out else Path(config.reports_dir)
+    review_outcome = run_review(
+        diff=diff,
+        source_name=branch,
+        repo_root=repo_root,
+        config=config,
+        out_dir=out_dir,
+        no_llm=no_llm,
+        branch_source=(base_ref, branch),
+        as_json=as_json,
+    )
+    exit_code = max(check_exit, review_outcome.exit_code)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "stage": "gate",
+                    "exit_code": exit_code,
+                    "check": check_result,
+                    "review": review_outcome.json_report,
+                },
+                indent=2,
+            )
+        )
+    return exit_code
 
 
 @cli.command()

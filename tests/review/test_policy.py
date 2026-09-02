@@ -30,3 +30,34 @@ def test_any_blocking_finding_dominates_comments() -> None:
     ]
 
     assert verdict(findings) == ("BLOCK", 2)
+
+
+def test_review_incomplete_without_a_blocking_finding_is_inconclusive() -> None:
+    findings = [{"severity": "S3", "confidence": "high"}]
+
+    assert verdict(findings, review_complete=False) == ("INCONCLUSIVE", 4)
+
+
+def test_review_incomplete_with_no_findings_is_inconclusive() -> None:
+    assert verdict([], review_complete=False) == ("INCONCLUSIVE", 4)
+
+
+def test_a_trusted_blocking_finding_wins_over_an_incomplete_review() -> None:
+    findings = [{"severity": "S1", "confidence": "high"}]
+
+    assert verdict(findings, review_complete=False) == ("BLOCK", 2)
+
+
+def test_contextual_finding_is_always_comment_never_block() -> None:
+    findings = [{"requires_human_classification": True}]
+
+    assert verdict(findings) == ("COMMENT", 0)
+
+
+def test_contextual_finding_does_not_suppress_a_real_blocking_finding() -> None:
+    findings = [
+        {"requires_human_classification": True},
+        {"severity": "S1", "confidence": "high"},
+    ]
+
+    assert verdict(findings) == ("BLOCK", 2)

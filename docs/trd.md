@@ -202,7 +202,7 @@ Nunca se incluyen: el patch original, la respuesta cruda del proveedor, el mapa 
 | 3 | Firewall gitleaks (diff) | A `secrets_gate.py` por stdin, `--redact` | leak → BLOCK sin proveedor; gitleaks ausente → 4 |
 | 4 | Egress | `raw` (default): context pack de A · `minimized` ★: B egress con validación residual | `minimized` residual falla → INCONCLUSIVE (4); nunca se envía ni se hace eco del valor |
 | 5 | Proveedor | ADR-002; `fake` para tests/calibrate | sin key → `skipped:no_provider_key`, veredicto por capas 2-3 (exit 0/2); transitorio → reintentos; permanente → 4 |
-| 6 | Validación | schema (A) + `rule_id ∈ registry` (ADR-001) + ★ rangos dentro de líneas cambiadas del lado declarado + severidad desde el catálogo o contextual ⇒ `requires_human_classification` | `degrade` (default, A): hallazgo con evidencia no verificable → `confidence=low` visible, `filtered_out` audita lo estructuralmente inválido · `fail_closed` ★: cualquier fallo invalida la respuesta entera → INCONCLUSIVE |
+| 6 | Validación | schema (A) + `rule_id ∈ registry` (ADR-001) + ★ rangos dentro de líneas cambiadas del lado declarado + severidad desde el catálogo o contextual ⇒ `requires_human_classification` | `degrade` (default, A): `rule_id` desconocido o rango fuera de las líneas cambiadas → `filtered_out` con `reason` (visible, binario); hallazgos válidos conservan la severidad resuelta del catálogo · `fail_closed` ★: cualquier fallo invalida la respuesta entera → INCONCLUSIVE |
 | 7 | Policy | `TRUST_POLICY[(severity, confidence)]`; contextual → COMMENT; `review_complete=false` → INCONCLUSIVE aunque no haya hallazgos | — |
 | 8 | Reporte | JSON + md sanitizados; comentario idempotente en PR (B) | IO → 4 |
 

@@ -128,6 +128,8 @@ Given schema-valid raw findings + the loaded `Registry` + a per-side changed-lin
 - **`degrade`** (default): invalid findings → `filtered_out` (visible, `reason: "unknown_rule_id"` or `"range_not_in_changed_lines"`); valid findings pass through with resolved severity. `review_complete` stays `True`. This preserves today's "evidence with unresolvable location survives visibly" philosophy, just with a crisper verification mechanism.
 - **`fail_closed`**: any invalid finding invalidates the **entire** response — `validated_findings = []` for that LLM call (none of that response's findings are trusted, not even the individually-valid ones), `review_complete = False`.
 
+**Audit trail under `fail_closed`:** the discarded findings do not appear in `filtered_out` — per TRD §4.3's own schema comment, that field is `degrade`-only ("`filtered_out` ... solo con evidence_policy=degrade"), and echoing an untrusted response's content into a structured, machine-parsed report field cuts against the whole point of `fail_closed` (nothing about that response is trusted enough to persist, not even which rule_ids it cited). What *is* recorded: `reviewer.py` sets `review["note"]` (the existing mechanism `_blocked_review` already uses for the secret-firewall case, rendered in both the JSON `note` field and the Markdown report's `> **{note}**` line) to a short counts-only message — e.g. `"LLM review invalidated: 2 of 5 findings failed validation (unknown_rule_id/range_not_in_changed_lines); response discarded (fail_closed)."` Counts and failure-reason categories only, never the discarded findings' `rule_id`/`title`/`evidence` content.
+
 **Invariant (load-bearing for §5.3's policy design):** whenever `validation.py` returns `review_complete = False`, it must also return zero findings for that LLM call. `review_complete = False` only ever originates here (technical failures like a missing gitleaks binary already raise `InconclusiveError` directly, bypassing this path entirely); under `degrade`, `review_complete` is always `True`. This is what lets `policy.verdict()` treat "BLOCK present" and "review incomplete" as never being caused by the *same* untrustworthy source — see §5.3.
 
 ## 5. `policy.py` / `postfilter.py` / `reviewer.py` / `context_pack.py` / prompt
@@ -198,6 +200,8 @@ New `render_rules_block(rules: Sequence[Rule]) -> str` helper + optional `rules_
 - `lint` failure → `click.UsageError` → **exit 64** (config/usage error, same class as `Config`'s unknown-key rejection — not a review verdict).
 - `build --check` drift → a new `StandardsDriftError` (mapped in `main.py`'s `exit_code_for`) → **exit 2**. This exit 2 is **not** accompanied by a schema-v3 JSON report (no `stage: "review"`, no `verdict: "BLOCK"` payload) — it's a plain CLI failure. A one-line note is added to `docs/trd.md` (near where `attest standards build|lint` is described) making this explicit, so nothing downstream assumes exit 2 always implies that report shape.
 
+`docs/trd.md` §5 row 6 already updated (this session, ahead of implementation) to match §4.3's binary `filtered_out` mechanism instead of the retired text-anchoring "confidence=low" language — was inconsistent with its own §4.3 before this fix.
+
 ## 7. Out of scope for this WP (explicit boundaries, not silent gaps)
 
 - **`code_review_v2.txt`** and anything under `review/egress/` — F0.3.
@@ -210,7 +214,7 @@ New `render_rules_block(rules: Sequence[Rule]) -> str` helper + optional `rules_
 - Fixtures of invalid `standards.yml` (duplicate id, both `severity` and `severity_policy`, `deterministic` without `check`, unknown `check`, bad `id` pattern) → named lint errors.
 - `migrate_review_rules.py` regression test against the committed `tests/standards/fixtures/seed_b_review_rules.json` copy.
 - Contextual rule fixture (`retention-1`) → COMMENT with `requires_human_classification=true`.
-- `--evidence-policy degrade` keeps a range-mismatched finding at `confidence=low`, visible; `fail_closed` on the same input yields INCONCLUSIVE.
+- `--evidence-policy degrade`: a finding with an unknown `rule_id` or a range outside the changed lines for its declared side goes to `filtered_out` with its `reason` — it does **not** stay in `findings` at a degraded confidence. This is a binary outcome (kept as validated, or filtered out), not the old text-anchoring mechanism's three-way "verified / re-anchored / confidence=low" spectrum, which the line-range check retires. `fail_closed` on the same input yields INCONCLUSIVE (§4.2's whole-response invalidation).
 - Seed A's golden fixtures (`streaks.patch` etc.) still produce 6/6 BLOCK offline with `rule_id`-shaped findings.
 - Every already-migrated Seed A test file using the old `rule`/`file`/`line` shape (`tests/review/test_models.py`, `test_postfilter.py`, `test_reviewer.py`, `test_secrets_gate.py`, and the `tests/review/fixtures/*.json` finding fixtures) is updated to the new shape and real rule ids from §3's table, including the file-level → always-anchored behavior change in §4.1 (null-line tests in `test_models.py`/`test_postfilter.py`, and the JSON-report assertion at `test_reviewer.py:600`).
 - `attest standards lint`/`build --check` exercised against `py_attest/standards/defaults/{core,domain}.standards.yml` directly (not through a self-hosted repo — py-attest doesn't self-host yet, that's F1.3).

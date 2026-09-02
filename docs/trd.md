@@ -81,7 +81,7 @@ py_attest/
 │   ├── egress/raw.py        context pack (default)                                               ← A
 │   ├── egress/minimized.py  ★ alias de rutas, eliminación de valores, validación residual         ← B egress.py + redaction.py
 │   ├── reviewer.py          orquesta egress → provider → validación                              ← A review.py (main) + llm.py (parte)
-│   ├── postfilter.py        evidencia por fragmentos, degrade-not-drop (evidence_policy=degrade)  ← A postfilter.py
+│   ├── postfilter.py        solo dedup: merge_findings por (rule_id, path, side, line_start, line_end)  ← A postfilter.py
 │   ├── validation.py        ★ fail_closed: rangos en líneas cambiadas por lado, alias, severidad  ← B reviewer.py (validación)
 │   ├── policy.py            TRUST_POLICY (severidad × confianza) + contextual → COMMENT           ← A gating.py + ★ B policy.py
 │   ├── report.py            JSON (§4.3) + Markdown; sanitización de salida                       ← A review.py (render) + ★ B report.py

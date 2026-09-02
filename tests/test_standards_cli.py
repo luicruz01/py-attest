@@ -38,6 +38,20 @@ def test_standards_lint_exits_64_on_a_schema_violation(tmp_path: Path, monkeypat
     assert result.exit_code == 64
 
 
+def test_standards_build_exits_64_on_a_schema_violation(tmp_path: Path, monkeypatch) -> None:
+    # Same malformed input as test_standards_lint_exits_64_on_a_schema_violation above --
+    # `build` (no --check) must map the identical RegistryError to the identical exit
+    # code, not fall through to the generic exit-4 handler.
+    (tmp_path / "core.standards.yml").write_text("not: [valid", encoding="utf-8")
+    (tmp_path / "domain.standards.yml").write_text("version: 1\nsections: []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["standards", "build"])
+
+    assert result.exit_code == 64
+
+
 def test_standards_build_writes_team_standards_md(tmp_path: Path, monkeypatch) -> None:
     _write_standards(tmp_path)
     monkeypatch.chdir(tmp_path)

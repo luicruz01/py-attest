@@ -18,6 +18,7 @@ from py_attest.review.diff import DiffError, _branch_diff
 from py_attest.review.reviewer import run_review
 from py_attest.standards.build import build as build_standards
 from py_attest.standards.lint import lint as lint_standards
+from py_attest.standards.registry import RegistryError
 
 
 def exit_code_for(exc: BaseException) -> int:
@@ -273,7 +274,15 @@ def build(config: Config, check: bool) -> int:
     core = repo_root / config.standards.core
     domain = repo_root / config.standards.domain
     output = repo_root / config.standards.output
-    build_standards(core, domain, output, check=check)
+    try:
+        build_standards(core, domain, output, check=check)
+    except RegistryError as exc:
+        # A malformed/missing core.standards.yml is a usage error, same as `lint`'s
+        # behavior for the identical input (exit 64) -- not an unmapped exit 4.
+        # StandardsDriftError (raised directly by build_standards on drift) is a
+        # ValueError-derived AttestError sibling, not a RegistryError, and is
+        # deliberately left to propagate untouched to its own exit-2 path.
+        raise click.UsageError(str(exc)) from exc
     click.echo(f"wrote {output}" if not check else f"{output} is up to date")
     return 0
 

@@ -1,0 +1,29 @@
+{
+  "findings": [
+    {
+      "rule_id": "code-quality-6",
+      "path": "app/streaks.py",
+      "side": "new",
+      "line_start": 10,
+      "line_end": 10,
+      "title": "Streak calculation contradicts docstring: ignores activity on today",
+      "evidence": "day = today - timedelta(days=1)",
+      "explanation": "The function's docstring promises a streak \"terminando hoy\" (ending today), but the implementation initializes the loop at yesterday (today - 1) and therefore never counts activity that occurred today. This produces incorrect streak counts when the user has activity today.",
+      "suggested_fix": "Include today when computing the streak. For example, start with day = today (or check today first) and loop while day in days, decrementing afterwards.",
+      "confidence": "high"
+    },
+    {
+      "rule_id": "testing-3",
+      "path": "app/streaks.py",
+      "side": "new",
+      "line_start": 5,
+      "line_end": 5,
+      "title": "Core logic added without effective tests that would detect regressions",
+      "evidence": "def current_streak(activity_dates: list[date], today: date | None = None) -> int:",
+      "explanation": "A new core utility (current_streak) was introduced but the test suite only contains trivial assertions (type check, non-negativity). These tests would not fail for an incorrect implementation such as the current one, which ignores today's activity.",
+      "suggested_fix": "Add deterministic tests that assert exact expected streak counts for representative cases: activity includes today, activity ends yesterday, multi-day streaks, gaps, duplicates, future dates.",
+      "confidence": "high"
+    }
+  ],
+  "summary": "Two blocking issues: the streak implementation contradicts its docstring by omitting today's activity (logic bug, S2), and the tests are trivial and would not detect that bug (insufficient test coverage for core logic, S2). No PII, retention, or secrets issues were found in the diff."
+}

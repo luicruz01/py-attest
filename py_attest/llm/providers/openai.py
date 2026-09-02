@@ -1,100 +1,126 @@
-"""OpenAI client wrapper for structured review requests."""
+"""OpenAI provider (ADR-002): Chat Completions with strict json_schema structured
+output and a one-shot temperature fallback (Seed A), adapted to the Provider protocol,
+with `store=False` (Seed B, ADR-004 SS2(b)). No internal retries: SDK retries are
+disabled (`max_retries=0`) so `llm/policy.py` owns the attempt count.
+"""
 
-import json
+from __future__ import annotations
+
 import os
-from pathlib import Path
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
-from py_attest.review.models import REVIEW_SCHEMA, SchemaValidationError, validate_review_result
+from py_attest.llm.types import ProviderFailure, ProviderRequest, ProviderResponse, Usage
 
-DEFAULT_MODEL = "gpt-5-mini"
-MAX_DIFF_BYTES = 60 * 1024
-PROMPT_PATH = Path(__file__).parents[1] / "prompts" / "reviewer_v1.md"
-PROMPT_PATHS = {
-    "v1": PROMPT_PATH,
-    "v2": Path(__file__).parents[1] / "prompts" / "reviewer_v2.md",
-    "v3": Path(__file__).parents[1] / "prompts" / "reviewer_v3.md",
-}
-
-
-class LLMReviewError(RuntimeError):
-    """Raised when an LLM review cannot be requested or decoded."""
+_STRUCTURED_OUTPUT_NAME = "quality_gate_review"
 
 
-class MissingProviderKeyError(LLMReviewError):
-    """Raised when no OPENAI_API_KEY is configured; callers should skip gracefully."""
+def _classify(exc: Exception) -> str:
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return "not_configured"
+    if isinstance(exc, RateLimitError):
+        return "transient"
+    if isinstance(exc, APITimeoutError):
+        return "transient"
+    if isinstance(exc, APIConnectionError):
+        return "transient"
+    if isinstance(exc, APIStatusError) and 500 <= exc.status_code < 600:
+        return "transient"
+    return "rejected"
 
 
-def review_context(
-    context: str,
-    diff: str,
-    *,
-    client: OpenAI | None = None,
-    model: str | None = None,
-    prompt_version: str = "v2",
-) -> dict[str, Any]:
-    """Request a structured review, with one unsupported-temperature fallback."""
-    diff_size = len(diff.encode("utf-8"))
-    if diff_size > MAX_DIFF_BYTES:
-        raise LLMReviewError(
-            f"diff too large: {diff_size} bytes exceeds the {MAX_DIFF_BYTES}-byte limit"
+def _map_exception(exc: Exception) -> ProviderFailure:
+    return ProviderFailure(_classify(exc), f"OpenAI request failed: {exc}")
+
+
+class OpenAIProvider:
+    name = "openai"
+
+    def __init__(self, *, timeout: float = 30.0, client: OpenAI | None = None) -> None:
+        self._client = client
+        self._timeout = timeout
+
+    def _client_or_build(self) -> OpenAI:
+        if self._client is not None:
+            return self._client
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ProviderFailure("not_configured", "OPENAI_API_KEY is not set")
+        return OpenAI(api_key=api_key, timeout=self._timeout, max_retries=0)
+
+    def complete_structured(self, request: ProviderRequest) -> ProviderResponse:
+        client = self._client_or_build()
+        base_kwargs: dict[str, Any] = {
+            "model": request.model,
+            "messages": [
+                {"role": "system", "content": request.system_prompt},
+                {"role": "user", "content": request.user_content},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _STRUCTURED_OUTPUT_NAME,
+                    "strict": True,
+                    "schema": request.output_schema,
+                },
+            },
+            "store": False,
+        }
+
+        temperature_applied = "model-default"
+        kwargs = dict(base_kwargs)
+        if request.temperature is not None:
+            kwargs["temperature"] = request.temperature
+        try:
+            response = client.chat.completions.create(**kwargs)
+            if request.temperature is not None:
+                temperature_applied = str(request.temperature)
+        except BadRequestError as exc:
+            if (
+                request.temperature is None
+                or exc.param != "temperature"
+                or (exc.code != "unsupported_value")
+            ):
+                raise _map_exception(exc) from exc
+            try:
+                response = client.chat.completions.create(**base_kwargs)
+            except Exception as retry_exc:  # noqa: BLE001 - mapped to ProviderFailure below
+                raise _map_exception(retry_exc) from retry_exc
+        except Exception as exc:  # noqa: BLE001 - mapped to ProviderFailure below
+            raise _map_exception(exc) from exc
+
+        content = response.choices[0].message.content
+        if content is None:
+            raise ProviderFailure(
+                "invalid_structured_output", "OpenAI returned no structured review content"
+            )
+        return ProviderResponse(
+            raw_json=content,
+            model=response.model,
+            temperature_applied=temperature_applied,
+            usage=_usage_from_response(response),
         )
 
-    if client is None:
-        client = _client_from_environment()
-    selected_model = model or os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
-    system_prompt = _read_system_prompt(prompt_version)
 
-    request = {
-        "model": selected_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "quality_gate_review",
-                "strict": True,
-                "schema": REVIEW_SCHEMA,
-            },
-        },
-    }
-    temperature = "0"
-    try:
-        response = client.chat.completions.create(temperature=0, **request)
-    except BadRequestError as exc:
-        if exc.param != "temperature" or exc.code != "unsupported_value":
-            raise
-        response = client.chat.completions.create(**request)
-        temperature = "model-default"
-
-    content = response.choices[0].message.content
-    if content is None:
-        raise LLMReviewError("OpenAI returned no structured review content")
-    try:
-        decoded = json.loads(content)
-        result = validate_review_result(decoded)
-        result["metadata"] = {"temperature": temperature}
-        return result
-    except (json.JSONDecodeError, SchemaValidationError) as exc:
-        raise LLMReviewError(f"OpenAI returned an invalid structured review: {exc}") from exc
-
-
-def _client_from_environment() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise MissingProviderKeyError("OPENAI_API_KEY is not set; add it to the environment")
-    return OpenAI(api_key=api_key, max_retries=0)
-
-
-def _read_system_prompt(prompt_version: str = "v1") -> str:
-    prompt_path = PROMPT_PATHS.get(prompt_version)
-    if prompt_path is None:
-        raise LLMReviewError(f"unknown prompt version: {prompt_version}")
-    try:
-        return prompt_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise LLMReviewError(f"cannot read reviewer prompt: {prompt_path.name}") from exc
+def _usage_from_response(response: Any) -> Usage | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    return Usage(
+        input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        cached_input_tokens=getattr(details, "cached_tokens", 0) or 0,
+        output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        reasoning_tokens=getattr(completion_details, "reasoning_tokens", 0) or 0,
+    )

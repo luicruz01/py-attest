@@ -67,64 +67,28 @@ def test_review_diff_file_no_llm_approves_a_clean_patch(tmp_path: Path) -> None:
     assert report["exit_code"] == result.exit_code
 
 
-def test_review_head_flag_is_not_implemented_yet(
+def test_review_head_flag_diffs_against_base(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
-
-    result = runner.invoke(cli, ["review", "--head", "deadbeef"])
-
-    assert result.exit_code == 64
-    assert "F0.3" in result.output
-
-
-def test_review_fake_response_flag_is_not_implemented_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    out_dir = tmp_path / "out"
     runner = CliRunner()
 
     result = runner.invoke(
         cli,
-        [
-            "review",
-            "--diff-file",
-            str(FIXTURES / "streaks.patch"),
-            "--fake-response",
-            "{}",
-        ],
+        ["review", "--head", "HEAD", "--base", "HEAD", "--no-llm", "--out", str(out_dir)],
     )
 
-    assert result.exit_code == 64
-    assert "F0.3" in result.output
+    assert result.exit_code == 0
+    report = json.loads((out_dir / "HEAD.json").read_text(encoding="utf-8"))
+    assert report["source"]["base_sha"] == report["source"]["head_sha"]
 
 
-def test_review_egress_minimized_is_not_implemented_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("egress", ["raw", "minimized"])
+def test_review_fake_provider_produces_a_schema_v3_report_in_both_egress_modes(
+    tmp_path: Path, egress: str
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
-
-    result = runner.invoke(
-        cli,
-        [
-            "review",
-            "--diff-file",
-            str(FIXTURES / "streaks.patch"),
-            "--egress",
-            "minimized",
-        ],
-    )
-
-    assert result.exit_code == 64
-    assert "F0.3" in result.output
-
-
-def test_review_fake_provider_is_not_implemented_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / "out"
     runner = CliRunner()
 
     result = runner.invoke(
@@ -135,11 +99,88 @@ def test_review_fake_provider_is_not_implemented_yet(
             str(FIXTURES / "streaks.patch"),
             "--provider",
             "fake",
+            "--fake-response",
+            str(FIXTURES / "clean.json"),
+            "--egress",
+            egress,
+            "--out",
+            str(out_dir),
         ],
     )
 
+    assert result.exit_code == 0, result.output
+    report = json.loads((out_dir / "streaks.patch.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == 3
+    assert report["verdict"] == "APPROVE"
+    assert report["layers"]["llm"] == "ran"
+    assert report["egress"]["mode"] == egress
+    if egress == "raw":
+        assert report["egress"] == {"mode": "raw", "context_files": []}
+    else:
+        assert report["egress"] == {"mode": "minimized", "payload_version": "MINIMIZED_PATCH_V2"}
+
+
+def test_review_fake_provider_without_fake_response_is_a_usage_error() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["review", "--diff-file", str(FIXTURES / "streaks.patch"), "--provider", "fake"],
+    )
+
     assert result.exit_code == 64
-    assert "F0.3" in result.output
+
+
+@pytest.mark.parametrize("egress", ["raw", "minimized"])
+def test_review_secret_diff_blocks_with_zero_provider_calls_in_both_egress_modes(
+    egress: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DONE WHEN: a diff with a secret yields BLOCK and zero provider calls in both
+    modes. `--provider fake` still gets picked (validated), but never invoked -- if it
+    were, `--fake-response` isn't given and `_build_provider` would raise UsageError
+    (exit 64), not the exit-2 BLOCK asserted below.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "review",
+            "--diff-file",
+            str(FIXTURES / "secret.patch"),
+            "--provider",
+            "fake",
+            "--egress",
+            egress,
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+
+
+def test_review_diff_over_the_patch_byte_limit_is_inconclusive_without_a_provider_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DONE WHEN: a diff over limits.max_patch_bytes yields INCONCLUSIVE (4) without a
+    provider call. `--provider fake` with no `--fake-response` would surface as exit 64
+    (UsageError) instead if the provider were ever reached -- exit 4 proves it wasn't:
+    the byte-limit check runs before deterministic/firewall/egress/provider (TRD SS5 row 1).
+    """
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.attest.limits]\nmax_patch_bytes = 10\n", encoding="utf-8"
+    )
+    oversized = tmp_path / "oversized.patch"
+    oversized.write_text(
+        "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -0,0 +1 @@\n+x = 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["review", "--diff-file", str(oversized), "--provider", "fake"])
+
+    assert result.exit_code == 4, result.output
 
 
 def test_review_evidence_policy_flag_does_not_collide_with_no_llm(tmp_path: Path) -> None:
@@ -180,12 +221,11 @@ def test_review_evidence_policy_flag_actually_overrides_the_config_default(
     # exercised --evidence-policy actually overriding Config.evidence_policy (the
     # "degrade" default) through the CLI -- the only fail_closed coverage went through
     # Config(evidence_policy=...) directly, never the flag. This drives the LLM call
-    # (via a monkeypatched review_context, as in tests/review/test_reviewer.py's
+    # (via a monkeypatched _call_provider, as in tests/review/test_reviewer.py's
     # fail_closed test) with an invalid finding and asserts the flag alone flips the
     # verdict to INCONCLUSIVE, proving the override reaches run_review.
     from py_attest.review import reviewer as review_module
 
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
     monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
     bad_finding = {
@@ -200,11 +240,11 @@ def test_review_evidence_policy_flag_actually_overrides_the_config_default(
         "suggested_fix": "Change the implementation to follow the standard.",
         "confidence": "high",
     }
-    monkeypatch.setattr(
-        review_module,
-        "review_context",
-        lambda *_a, **_kw: {"findings": [bad_finding], "summary": "One violation."},
-    )
+
+    def fake_call_provider(**_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+        return {"findings": [bad_finding], "summary": "One violation."}, {}
+
+    monkeypatch.setattr(review_module, "_call_provider", fake_call_provider)
     out_dir = tmp_path / "out"
     runner = CliRunner()
 

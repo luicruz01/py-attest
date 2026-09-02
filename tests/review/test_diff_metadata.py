@@ -4,9 +4,7 @@ These are new in F0.2 (needed for the report's `source` block); Seed A's diff.py
 had `_branch_diff`/`_gate_commit`, ported in tests/review/test_reviewer.py.
 """
 
-import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -47,12 +45,16 @@ def test_patch_sha256_is_deterministic_and_content_addressed() -> None:
 
 
 def test_resolve_sha_raises_diff_error_for_an_unknown_ref() -> None:
-    with pytest.raises(DiffError, match="cannot resolve"):
+    """The bounded git primitive (review/diff.py's `_git`) deliberately never echoes raw
+    git stderr into the error message (ADR-004 §2(d) -- avoids leaking repo-controlled
+    stderr content back into reports); it's replaced by a fixed, generic message.
+    """
+    with pytest.raises(DiffError, match="Git could not resolve or compare"):
         _resolve_sha(Path.cwd(), "not-a-real-ref-xyz")
 
 
 def test_merge_base_raises_diff_error_for_unrelated_refs() -> None:
-    with pytest.raises(DiffError, match="cannot resolve merge base"):
+    with pytest.raises(DiffError, match="Git could not resolve or compare"):
         _merge_base(Path.cwd(), "HEAD", "not-a-real-ref-xyz")
 
 
@@ -83,16 +85,13 @@ def test_merge_base_raises_diff_error_when_git_is_missing(
         _merge_base(Path.cwd(), "main", "feature/x")
 
 
-def test_branch_diff_raises_diff_error_on_git_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise subprocess.CalledProcessError(128, command, output="", stderr="fatal: bad revision")
-
-    monkeypatch.setattr(diff_module.subprocess, "run", fake_run)
-
-    with pytest.raises(DiffError, match="fatal: bad revision"):
-        diff_module._branch_diff(Path.cwd(), "main", "feature/x")
+def test_branch_diff_raises_diff_error_on_git_failure() -> None:
+    """`_branch_diff` now resolves through `acquire_patch` (bounded git primitives,
+    ADR-004 §2(d)), which never calls `subprocess.run` -- an unresolvable ref surfaces as
+    a plain DiffError, same as `_resolve_sha`/`_merge_base` above.
+    """
+    with pytest.raises(DiffError, match="Git could not resolve or compare"):
+        diff_module._branch_diff(Path.cwd(), "main", "not-a-real-ref-xyz")
 
 
 @pytest.mark.parametrize("bad_ref", ["-h", "--upload-pack=evil", "--exec"])

@@ -14,7 +14,7 @@ from py_attest.errors import (
     InconclusiveError,
     StandardsDriftError,
 )
-from py_attest.review.diff import DiffError, _branch_diff
+from py_attest.review.diff import DiffError, _branch_diff, acquire_patch
 from py_attest.review.reviewer import run_review
 from py_attest.standards.build import build as build_standards
 from py_attest.standards.lint import lint as lint_standards
@@ -117,12 +117,6 @@ def review(
     """Run the LLM-backed review over a diff. Never executes repo code."""
     if not any([branch, head, diff_file]):
         raise click.UsageError("review requires one of --branch, --head, or --diff-file")
-    if head:
-        raise click.UsageError("--head is not implemented yet (F0.3, ADR-004 bounded acquisition)")
-    if fake_response:
-        raise click.UsageError("--fake-response is not implemented yet (F0.3, fake provider)")
-    if egress and egress != "raw":
-        raise click.UsageError(f"egress={egress!r} is not implemented yet (F0.3)")
 
     repo_root = Path.cwd()
     branch_source = None
@@ -130,10 +124,18 @@ def review(
         diff_path = Path(diff_file)
         diff = diff_path.read_text(encoding="utf-8")
         source_name = diff_path.name
+    elif head:
+        base_ref = base or config.base_branch
+        try:
+            diff = acquire_patch(repo_root, base_ref, head, config.limits).raw_text
+        except DiffError as exc:
+            raise InconclusiveError(str(exc)) from exc
+        source_name = head
+        branch_source = (base_ref, head)
     else:
         base_ref = base or config.base_branch
         try:
-            diff = _branch_diff(repo_root, base_ref, branch)
+            diff = _branch_diff(repo_root, base_ref, branch, config.limits)
         except DiffError as exc:
             raise InconclusiveError(str(exc)) from exc
         source_name = branch
@@ -151,6 +153,8 @@ def review(
         no_llm=no_llm,
         provider=provider,
         evidence_policy=evidence_policy,
+        egress=egress,
+        fake_response=fake_response,
         branch_source=branch_source,
         as_json=as_json,
     )
@@ -203,7 +207,7 @@ def gate(
 
     base_ref = base or config.base_branch
     try:
-        diff = _branch_diff(repo_root, base_ref, branch)
+        diff = _branch_diff(repo_root, base_ref, branch, config.limits)
     except DiffError as exc:
         raise InconclusiveError(str(exc)) from exc
 

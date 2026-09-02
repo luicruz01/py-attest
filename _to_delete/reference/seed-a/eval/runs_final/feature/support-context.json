@@ -1,0 +1,39 @@
+{
+  "findings": [
+    {
+      "rule": "3-PII-logging",
+      "severity": "S1",
+      "file": "app/support.py",
+      "line": 37,
+      "title": "Unredacted PII (including birthdate) collected and logged",
+      "evidence": "logger.info(\"progress lookup %s\", build_support_context(student, records))\n\ndef build_support_context(student, records):\n    return {\n        \"student\": f\"{student.full_name} <{student.email}>\",\n        \"birthdate\": student.birthdate,\n        \"country\": student.country,\n        \"records\": len(records),\n    }",
+      "explanation": "The new support context assembles and the code logs direct personal data fields: full_name, email, and birthdate. TEAM-STANDARDS.md \u00a73 requires that PII must not be written to logs and that app.privacy.redact() be used. birthdate explicitly reveals age and, if the student is a minor, this is `pii-minor` \u2014 PII exposure involving minors is S1 and blocks merge.",
+      "suggested_fix": "Do not log unredacted PII. Build a minimised, non-identifying support payload and/or apply app.privacy.redact() to any payload before logging. For example, log only non-PII (country, records count) and if an identifying field is required for support, log a redacted version: redact({\"full_name\": student.full_name, \"email\": student.email, \"birthdate\": student.birthdate, ...}). Also ensure code avoids including minors' data in logs unless a documented legal basis is present in the PR.",
+      "confidence": "high",
+      "evidence_verified": true,
+      "re_anchored": true
+    },
+    {
+      "rule": "2-testing",
+      "severity": "S2",
+      "file": "app/support.py",
+      "line": 4,
+      "title": "New support logic added without tests",
+      "evidence": "def build_support_context(student, records):",
+      "explanation": "The PR adds new behavior (build_support_context) that composes a support payload containing personal data and is used by the logged path in get_progress. TEAM-STANDARDS.md \u00a72 requires that every logic change includes tests that fail if the behavior breaks. There are no accompanying tests in this diff that would catch regressions in how the support context is constructed or that logging doesn't inadvertently include PII.",
+      "suggested_fix": "Add unit tests for build_support_context to validate the exact structure returned, ensure PII fields are handled appropriately (e.g. redacted when required), and tests for get_progress to assert that logging occurs only with safe/redacted payloads. Tests should fail if PII is exposed or if the support payload shape changes unexpectedly.",
+      "confidence": "high",
+      "evidence_verified": true,
+      "re_anchored": true
+    }
+  ],
+  "summary": "The PR introduces a support context builder and logs its output. This directly constructs and logs unredacted personal fields (full_name, email, birthdate), which is a PII exposure and \u2014 if the student is a minor \u2014 escalates to pii-minor handling rules (S1). Additionally, the new logic is untested (S2). Fix by removing unredacted PII from logs (use app.privacy.redact() or log only non-identifying fields) and adding unit tests that would catch regressions and any accidental PII exposure.",
+  "filtered_out": [],
+  "meta": {
+    "prompt_version": "v3",
+    "model": "gpt-5-mini",
+    "temperature": "model-default",
+    "gate_commit": "6e10c5e"
+  },
+  "verdict": "BLOCK"
+}

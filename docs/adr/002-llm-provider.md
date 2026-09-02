@@ -4,6 +4,7 @@
 **Date:** 2026-09-01
 **Deciders:** Luis Cruz
 **Parte de:** TRD py-attest · PRD v0.3 §7.2, §11.4 · Depende de ADR-001 (los findings citan `rule_id`)
+**Amended by ADR-004 (2026-09-02):** Seed B (rama `fix/quality-gate-safety` del seed) implementa este contrato en `quality_gate/providers/base.py` (`Provider` Protocol, `ProviderRequest`/`ProviderResponse` con la regla "el raw nunca cruza la frontera", `ProviderFailure(category)` sanitizada) más un proveedor **`fake`** offline y OpenAI vía **Responses API** (`store=False`, sin tools, sin `previous_response_id`, reintentos solo en transitorios, sin reintento en auth/invalid/refusal). Se rescata la forma de B; el proveedor OpenAI de Seed A (`tools/quality_gate/llm.py`: `json_schema` strict + fallback de temperatura) se adapta a ella, y se añaden a la respuesta `temperature_applied` (A), `usage` (incluidos `cached_input_tokens` y `reasoning_tokens`) y `attempts`. `fake` es proveedor oficial (tests, `calibrate`, CI sin key). La taxonomía de errores de este ADR se implementa sobre `ProviderFailure.category`. Anthropic se añade como en la Decisión. Lo que este ADR llama `ReviewRequest.user_content` es el payload de egress (`raw` o `MINIMIZED_PATCH_V2`), nunca el patch original.
 
 ## Context
 

@@ -1,6 +1,7 @@
 # Plan de implementación con Claude Code — py-attest
 
-**Estado:** v0.1 · **Fecha:** 2026-09-01 · **Base:** PRD v0.3, ADR-001/002/003, TRD v0.1
+**Estado:** v0.3 · **Fecha:** 2026-09-02 · **Base:** PRD v0.5, ADR-001/002/003/**004**, TRD v0.3
+**v0.3:** la base de código es **Seed A** (`/Users/luicruz/Documents/Personal/Code/student-progress-seed` en `main`, `tools/quality_gate/`); **Seed B** es la rama `fix/quality-gate-safety` del mismo repo, de la que se rescatan piezas (★). El gate se parte en `check`/`review`. Los prompts completos y vigentes viven en el runbook (fuera del repo); la §6 de este documento es solo un resumen.
 **Objetivo de este documento:** convertir el TRD en una secuencia ejecutable con Claude Code (CC): qué repos crear, en qué orden, qué corre en paralelo, qué contexto reciben los agentes, qué prompt abre cada sesión, y qué plugins habilitar.
 
 ---
@@ -20,7 +21,8 @@
 |---|---|---|---|
 | **`luicruz01/py-attest`** | motor + CLI + eval + `docs/` (PRD, ADRs, TRD, este plan) | Paso 0 | seed (solo lectura) |
 | **`luicruz01/py-attest-template`** | template Copier + CI cruzado | Paso 4 (tras `v1.0.0` en PyPI) | py-attest publicado |
-| seed `student-progress-seed` | referencia de solo lectura; su `tools/quality_gate/` y `tests/quality_gate/` se copian a py-attest en F0.2; sus 8 PRs se graban como fixtures del golden set en F0.5 | ya existe | — |
+| **Seed A** `../student-progress-seed` (`main`) | referencia de solo lectura: `tools/quality_gate/` y `tests/quality_gate/` se migran en F0.2; sus 8 ramas benchmark son fixtures congeladas (nunca se modifican ni se corre el reviewer contra ellas fuera del eval); su EVAL es el baseline `raw` | ya existe | — |
+| **Seed B** rama `fix/quality-gate-safety` del mismo repo | rescates ★ (catálogo, Protocol + fake, egress minimized, git acotado, side old/new, workflow pull_request_target + tests): se leen con `git show fix/quality-gate-safety:<ruta>` o desde un worktree `../seed-b`; cada rescate viaja con sus tests | ya existe | — |
 
 **Comunicación entre repos** (ADR-003): el template declara `attest_engine_range`; el motor no sabe nada del template. El CI del template instala el motor mínimo del rango y genera un repo de prueba; el CI del motor genera un repo con el último tag del template. Cada repo tiene el link al otro en su README y en `CLAUDE.md`.
 
@@ -33,14 +35,14 @@ Paso 0  Bootstrap py-attest (repo, docs, CLAUDE.md, plugins, CI vacío)        �
    │
 Paso 1  F0.1 esqueleto del paquete + exit codes + CI                          ── secuencial
    │
-Paso 2  F0.2 migrar gate/ desde el seed con sus tests                          ── secuencial (todo depende de esto)
+Paso 2  F0.2 migrar tools/quality_gate/ de Seed A → review/ + llm/ + check/ nuevo ── secuencial (todo depende de esto)
    │
    ├──────────────────────────┬────────────────────────┐
-Paso 3a F0.3 llm/ (ADR-002)   Paso 3b F0.4 standards/  Paso 3c doctor/ subset  ── PARALELO, 3 worktrees
-   │        (ADR-001) + gate resuelve severidad         (compat-*, standards-*)
+Paso 3a F0.3 llm/ + rescates  Paso 3b F0.4 standards/  Paso 3c doctor/ subset  ── PARALELO, 3 worktrees
+   │   fake, minimized, git★     + catálogo★, side★        (compat-*, standards-*)
    └──────────────────────────┴────────────────────────┘
    │  merge en orden: 3b → 3a → 3c (3c depende de 3b; 3a es independiente)
-Paso 4  F0.5 golden set grabado + eval/ + job semanal                          ── secuencial (necesita 3a y 3b)
+Paso 4  F0.5 golden set de A + medición de minimized + eval + anti-leakage★      ── secuencial (necesita 3a y 3b)
    │
 Paso 5  F0.6 release v1.0.0 a PyPI                                             ── humano (tag) + CC (changelog)
    │
@@ -88,15 +90,15 @@ DoD: `pytest` verde con tests de exit codes; `attest gate` sin args sale 64; `at
 
 ### Paso 2 — F0.2 Migración del gate (≈ 1-2 sesiones)
 
-Entrada: el seed en un directorio local (`../student-progress-seed`). CC copia `tools/quality_gate/*` → `py_attest/gate/` y `tests/quality_gate/*` → `tests/gate/` según el mapeo del TRD §3.1, **primero los tests** (deben fallar por imports), luego el código, hasta verde. Rutas hardcodeadas → `Config`. `review.py` se parte en `pipeline.py`, `diff.py`, `report.py`. Exit codes según TRD §4.1 (BLOCK=2, error=4).
+Entrada: Seed A en `../student-progress-seed` (`main`). CC migra `tools/quality_gate/*` → `py_attest/review/` + `py_attest/llm/` y `tests/quality_gate/*` → `tests/review/`, **primero los tests** (deben fallar por imports), luego el código, hasta verde. Rutas hardcodeadas → `Config`. `review.py` se parte en `reviewer.py`/`diff.py`/`report.py`. Exit codes: BLOCK→2, error→4. Crea `check/` (ruff, pytest+cov, gitleaks sobre el árbol) y `attest check`; `attest review --diff-file … --no-llm`; `attest gate` = ambos.
 
-DoD: todos los tests del seed pasan en su nueva casa; `attest gate --diff-file tests/gate/fixtures/streaks.patch --no-llm` produce JSON+md; sin referencia a `tools.quality_gate` en ningún import.
+DoD: los 8 archivos de tests de A pasan en su nueva casa; `attest review --diff-file tests/review/fixtures/streaks.patch --no-llm` produce JSON schema 3; `attest check` corre en el propio repo; sin imports de `tools.quality_gate`.
 
 ### Paso 3 — PARALELO (3 worktrees, 3 sesiones)
 
-**3a — F0.3 `llm/` (ADR-002).** Types, Protocol, taxonomía de errores, `policy.py` (reintentos/timeouts/attempts), registro por entry points, proveedor OpenAI portado del seed, proveedor Anthropic nuevo (`tool_use` forzado), `ProviderContractTests` + fixtures grabadas. `gate/pipeline.py` consume `llm.registry` en lugar del cliente OpenAI directo. DoD: contract tests verdes para ambos; `attest gate` sin key → `layers.llm = skipped:no_provider_key`, exit 0.
+**3a — F0.3 `llm/` + rescates de B (ADR-002/004).** `llm/types.py` con la forma de B★ (`git show fix/quality-gate-safety:quality_gate/providers/base.py`) + `temperature_applied` (A), `usage`, `attempts`, taxonomía de errores, entry points; OpenAI de A adaptado (+ `store=False`★); `fake`★ (`providers/fake.py` de B); Anthropic nuevo. Egress `minimized`★ (`egress.py`+`redaction.py` de B con `test_egress.py`) seleccionable por config junto al `raw` de A. Git acotado★ (`diff.py` de B con `test_diff.py`). DoD: tres proveedores pasan el contrato; ambos egress producen JSON schema 3; un diff con secreto → BLOCK sin llamada en ambos modos.
 
-**3b — F0.4 `standards/` (ADR-001).** `schema.json`, `registry.py`, `build.py` (Jinja → TEAM-STANDARDS.md, `--check`), `lint.py`; `core.standards.yml` inicial portando las secciones §1, §2, §5 del TEAM-STANDARDS.md del seed; `gate/schema.py` exige `rule_id` y `gating.py` resuelve severidad desde el registro. DoD: `attest standards build --check` y `attest standards lint` funcionan; fixtures de standards inválidos; el golden set del seed sigue produciendo los mismos veredictos con `rule_id` mapeados.
+**3b — F0.4 `standards/` (ADR-001 + ADR-004 §7).** `schema.json` (con `evidence_required`, `non_examples`, `severity_policy` contextual★), `registry.py`, `build.py`, `lint.py`; `migrate_review_rules.py`★ convierte `review_rules.json` de B en `core/domain.standards.yml` (tabla de IDs legacy→nuevos para el eval); la validación del reviewer resuelve severidad desde el registro; contextuales → COMMENT; `side` old/new★ y rangos por lado (`models.py` + `test_contracts.py` de B); `policy.py` = tabla de A + `decide()` de B★; `evidence_policy` `degrade` (A, default) | `fail_closed`★. DoD: build/lint funcionan; contextual → `requires_human_classification`; `degrade` vs `fail_closed` con tests; golden set de A sigue dando 6/6 con `rule_id`.
 
 **3c — Doctor subset (TRD §6, solo `standards-valid`, `standards-in-sync`, `compat-*`).** `doctor/runner.py`, la clase base `Check`, `report.py`, los 4 checks. Se escribe contra la interfaz de `standards.registry` acordada en el TRD; se rebasea sobre 3b antes del PR. DoD: `attest doctor --compat` en un repo con answers file de prueba produce los 4 estados pass/fail con `remedy`.
 

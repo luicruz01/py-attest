@@ -1,321 +1,263 @@
-# TRD v0.1 — py-attest
+# TRD v0.3 — py-attest
 
 **Producto:** `py-attest` (paquete PyPI, import `py_attest`, comando `attest`) + `py-attest-template` (template Copier)
-**Estado:** Borrador para revisión · **Autor:** Luis Cruz (con Claude) · **Fecha:** 2026-09-01
-**Base:** PRD v0.3 · ADR-001 (standards.yml) · ADR-002 (proveedor LLM) · ADR-003 (compatibilidad paquete↔template)
-**Cubre:** diseño del paquete, contratos de la CLI, pipeline del gate, catálogo v1 de checks del doctor, template, modelo de seguridad, estrategia de pruebas, plan de implementación F0-F1.
+**Estado:** Borrador para revisión · **Autor:** Luis Cruz (con Claude) · **Fecha:** 2026-09-02
+**Base:** PRD v0.5 · ADR-001 (standards.yml) · ADR-002 (proveedor LLM) · ADR-003 (compatibilidad) · **ADR-004 (Seed A como base, rescates de Seed B; gate en dos etapas)**
+**Cambios vs v0.2:** la base de código vuelve a ser Seed A (`tools/quality_gate/`, la entrega final y medida); las piezas de Seed B entran como rescates (★) en F0.3/F0.4; el job `pull_request_target` pasa a ser opción del template (`fork_reviews`); se conservan la separación `check`/`review`, el egress configurable, `inconclusive` → 4 y el anti-leakage.
+
+**Rutas de referencia (máquina de Luis):** py-attest en `/Users/luicruz/Documents/Personal/Code/py-attest`. Seed A = `../student-progress-seed` en `main` (`tools/quality_gate/`, `tests/quality_gate/`, `eval/`). Seed B = rama `fix/quality-gate-safety` del mismo repo, leída con `git show fix/quality-gate-safety:<ruta>` o desde un worktree `../seed-b` (`git worktree add ../seed-b fix/quality-gate-safety`). Nunca se mezclan ramas del seed.
 
 ---
 
 ## 1. Requisitos que gobiernan el diseño
 
-**Funcionales** (PRD §6): R1 motor como paquete (gate por capas, veredicto por tabla, degrade-not-drop, firewall de secretos) · R2 proveedor configurable y degradación limpia sin key · R3 golden set como regresión · R4 `attest new` (FastAPI en F1) · R5 `standards.yml` parseable y validable · R6 `attest gate` un motor, dos modos (local/CI) · R7 self-hosting · R8 `upgrade` · R9 `doctor` (solo reporte en v1).
+**Funcionales** (PRD §6): R1 motor como paquete · R2 proveedor configurable y degradación limpia sin key · R3 golden set como regresión (nunca tuning) · R4 `attest new` · R5 `standards.yml` · R6 gate en dos etapas con un comodín local · R7 self-hosting · R8 `upgrade` · R9 `doctor`.
 
 **No funcionales:**
 
 | Requisito | Valor | Origen |
 |---|---|---|
-| Instalación en CI ligera | base sin SDKs de LLM ni Copier; extras por uso | ADR-002, Luis (peso en CI) |
-| Paridad local/CI | el workflow y el Makefile invocan exactamente el mismo comando | PRD G1, R6 |
-| Determinismo | mismo diff + misma config → mismo veredicto (variancia solo en la capa LLM, acotada por la trust policy) | EVAL.md del seed |
-| Sin telemetría | ninguna llamada de red que no sea al proveedor LLM elegido o a git/PyPI/GitHub por acción explícita del usuario | PRD non-goal |
-| Python | 3.11 – 3.13 (3.11 mínimo: el seed ya lo exige; `tomllib` en stdlib) | seed |
-| Tiempo del gate en CI | ≤ 3 min sin LLM en repo pequeño; la llamada LLM acotada a 120 s × intentos | ADR-002 |
-| Offline | `doctor --offline`, `gate` sin key: todo lo determinista corre | R2, ADR-003 |
-
-**Restricciones:** un mantenedor; el seed ya funciona y está medido (F0 es extracción, no invención); Copier como motor de templating (no se reinventa); dos repos (ADR-003).
+| **`attest review` nunca ejecuta código del repo revisado** | no invoca pytest/ruff/hooks/imports; adquiere el diff como datos. Es lo que permite el job `pull_request_target` opcional (`fork_reviews`) | ADR-004 §4, Seed B ADR-003 |
+| Instalación en CI ligera | base sin SDKs de LLM ni Copier; extras por uso | ADR-002 |
+| Paridad local/CI | `make gate` = `attest check` + `attest review`; los workflows llaman los mismos comandos | PRD G1 |
+| Determinismo | mismo diff + misma config → mismo veredicto salvo la capa LLM, acotada por la trust policy | Seed A EVAL |
+| Fail-closed | un fallo técnico nunca se convierte en aprobación (exit 4, check rojo, humano) | Seed B |
+| Sin telemetría | ninguna llamada de red fuera del proveedor elegido o git/PyPI/GitHub por acción explícita | PRD non-goal |
+| Python | 3.11 – 3.13 | seed |
+| Tiempo | `check` ≤ 3 min en repo pequeño; `review` acotado por límites de patch (bytes/archivos/líneas) y timeouts de git/proveedor | Seed B |
+| Offline | `check` completo; `review --provider fake`; `doctor --offline` | R2 |
 
 ## 2. Arquitectura de alto nivel
 
 ```
- máquina del dev                          repo del usuario (generado o existente)
- ┌──────────────────────┐                 ┌─────────────────────────────────────────┐
- │ pipx/uvx py-attest   │  attest new     │ pyproject.toml  [tool.attest]           │
- │   [scaffold,openai]  │ ──────────────► │                 .[attest] = py-attest…  │
- │                      │  (Copier copy)  │ core.standards.yml ◄─ upgrade           │
- │ attest upgrade ──────┼───────────────► │ domain.standards.yml (skip_if_exists)   │
- │ attest doctor        │  (Copier update)│ TEAM-STANDARDS.md (generado)            │
- │ attest gate --branch │                 │ .github/workflows/attest.yml ─┐         │
- └──────────┬───────────┘                 │ Makefile: gate/test/lint      │         │
-            │                             └───────────────────────────────┼─────────┘
-            │  mismo binario, mismo comando                               │ CI
-            ▼                                                             ▼
- ┌────────────────────────────────── py_attest (motor) ──────────────────────────────┐
- │ cli ─► config ─► standards.registry ─► gate.pipeline                              │
- │        pipeline: lint → tests+cov → secrets(gitleaks) ─firewall─► llm.review       │
- │                  → schema.validate → postfilter → gating.verdict → report(md/json) │
- │ llm.providers: openai | anthropic | <entry points>        (ADR-002)                │
- │ doctor.checks: catálogo v1 (§6)                                                    │
- └───────────────────────────────────────────────────────────────────────────────────┘
-            │ git (diff, rev-parse)      │ gitleaks (binario)     │ HTTPS → proveedor LLM
+ repo del usuario (generado o existente)
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │ pyproject [tool.attest]  core/domain.standards.yml  TEAM-STANDARDS.md │
+ │ Makefile: gate = check + review                                       │
+ │ .github/workflows/attest.yml                                          │
+ │   job "check"  (pull_request, sin secrets, ejecuta el commit del PR)  │
+ │   job "review" (pull_request, secrets del repo; forks: skip)           │
+ │   [fork_reviews] job "review" en pull_request_target: checkout del    │
+ │                 SHA base, head como objetos inertes (Seed B)          │
+ └───────────┬───────────────────────────────┬──────────────────────────┘
+             ▼                               ▼
+ ┌──── attest check ────┐        ┌──────── attest review ───────────────┐
+ │ ruff · pytest+cov ·  │        │ diff acotado (git como datos)        │
+ │ gitleaks (árbol)     │        │ → deterministic (secretos, TODOs)    │
+ │ exit 0/2/4           │        │ → firewall: secreto ⇒ BLOCK, sin LLM │
+ └──────────────────────┘        │ → egress raw | minimized            │
+                                 │ → provider (fake|openai|anthropic)  │
+                                 │ → validación cerrada (schema, rule_id│
+                                 │   ∈ registry, rangos en líneas       │
+                                 │   cambiadas, severidad = catálogo)   │
+                                 │ → evidence_policy fail_closed|degrade│
+                                 │ → policy (tabla) → report (md/json)  │
+                                 │ exit 0/2/3/4                         │
+                                 └──────────────────────────────────────┘
+ attest gate (local) = check ; review        attest doctor = catálogo §6
 ```
-
-**Flujo de datos de `attest gate`** (§5 en detalle): diff de git → capas deterministas → si hay secreto, BLOCK sin transmisión → si no, *context pack* (standards `mode: llm` + archivos de referencia configurados + diff) → proveedor → `raw_json` → validación de schema (con `rule_id` resuelto contra el registro) → postfilter de evidencia → tabla de política → veredicto + artefactos.
 
 ## 3. Diseño del paquete `py-attest`
 
-### 3.1 Layout de módulos (mapeo desde el seed)
+### 3.1 Layout de módulos (mapeo desde Seed A; rescates de Seed B marcados ★)
 
 ```
 py_attest/
-├── __init__.py            __version__ (leída de metadata)
-├── cli/                   click; un módulo por comando
-│   ├── main.py            grupo raíz, manejo global de errores → exit codes (§4.1)
-│   ├── new.py  upgrade.py  doctor.py  gate.py  standards.py  calibrate.py (P2, stub)
-├── config.py              carga [tool.attest] + overrides ATTEST_*; dataclass Config
-├── standards/             ADR-001
-│   ├── schema.json        JSON Schema de standards.yml
-│   ├── registry.py        carga core+domain → Registry (rules by id, sections)
-│   ├── build.py           Registry → TEAM-STANDARDS.md (Jinja); --check
-│   └── lint.py            validación + cross-checks contra doctor.checks
-├── gate/
-│   ├── pipeline.py        orquestación de capas y degradaciones      ← review.py (main)
-│   ├── diff.py            git diff base...branch / --diff-file        ← review.py (_branch_diff)
-│   ├── context_pack.py    ← context_pack.py (archivos desde config, no hardcodeados)
-│   ├── secrets_gate.py    ← secrets_gate.py (sin cambios de fondo)
-│   ├── schema.py          ← schema.py (+ rule_id, evidence_verified, filtered_out)
-│   ├── postfilter.py      ← postfilter.py (sin cambios de fondo)
-│   ├── gating.py          ← gating.py (TRUST_POLICY_V1; severidad desde Registry)
-│   └── report.py          ← review.py (render_markdown) + JSON con provenance (ADR-003)
-├── llm/                   ADR-002
-│   ├── types.py           ReviewRequest/ReviewResponse/Usage, Provider Protocol, errores
-│   ├── policy.py          reintentos, timeouts, attempts
-│   ├── registry.py        entry points py_attest.providers
-│   ├── prompts/           reviewer_v3.md (+ historial v1/v2 solo en eval/)
-│   └── providers/openai.py  anthropic.py
-├── doctor/
-│   ├── runner.py          ejecuta checks, agrega reporte
-│   ├── checks/            un módulo por check (§6), registro por id
-│   └── report.py          md + JSON
-└── eval/                  ← eval_metrics.py + golden set (fixtures grabadas); no se instala en el wheel
+├── cli/                     click; main.py mapea excepciones → exit codes (§4.1)
+│   ├── check.py review.py gate.py doctor.py new.py upgrade.py standards.py calibrate.py
+├── config.py                [tool.attest] + [tool.attest.limits] + ATTEST_*
+├── standards/               ADR-001 (+ evidence_required, non_examples, severity_policy ★)
+│   ├── schema.json registry.py build.py lint.py
+│   └── migrate_review_rules.py   ★ B review_rules.json → core/domain.standards.yml (fixture de migración)
+├── check/                   NUEVO: las capas que ejecutan código
+│   └── runner.py            ruff, pytest+cov, gitleaks sobre el árbol → hallazgos deterministic     ← A Makefile/ci.yml
+├── review/                  ← A tools/quality_gate/ (el núcleo)
+│   ├── diff.py              git diff base...head como datos                                      ← A review.py (_branch_diff)
+│   │                        ★ límites en streaming, SHAs completos, merge-base, --full-index      ← B diff.py
+│   ├── models.py            Finding(rule_id, side ★, …), ReviewResult(schema_version)             ← A schema.py + ★ B models.py
+│   ├── deterministic.py     ★ secretos de alta confianza en líneas añadidas, TODOs sin ticket       ← B deterministic.py
+│   ├── secrets_gate.py      gitleaks sobre el diff por stdin, --redact (firewall)                ← A secrets_gate.py
+│   ├── context_pack.py      referencias (context_files) + reglas mode:llm + diff, como datos      ← A context_pack.py
+│   ├── egress/raw.py        context pack (default)                                               ← A
+│   ├── egress/minimized.py  ★ alias de rutas, eliminación de valores, validación residual         ← B egress.py + redaction.py
+│   ├── reviewer.py          orquesta egress → provider → validación                              ← A review.py (main) + llm.py (parte)
+│   ├── postfilter.py        evidencia por fragmentos, degrade-not-drop (evidence_policy=degrade)  ← A postfilter.py
+│   ├── validation.py        ★ fail_closed: rangos en líneas cambiadas por lado, alias, severidad  ← B reviewer.py (validación)
+│   ├── policy.py            TRUST_POLICY (severidad × confianza) + contextual → COMMENT           ← A gating.py + ★ B policy.py
+│   ├── report.py            JSON (§4.3) + Markdown; sanitización de salida                       ← A review.py (render) + ★ B report.py
+│   └── github_comment.py    ★ comentario idempotente con marcador                                 ← B github_comment.py
+├── llm/                     ADR-002
+│   ├── types.py             ★ forma de B providers/base.py + temperature_applied (A), usage, attempts
+│   ├── policy.py registry.py
+│   ├── prompts/reviewer_v3.md (A) · code_review_v2.txt (★ B, para egress minimized)
+│   └── providers/openai.py (A llm.py: json_schema strict + fallback de temperatura; ★ store=False de B)
+│                 fake.py (★ B) · anthropic.py (nuevo)
+├── doctor/                  runner.py checks/ report.py (§6)
+└── eval/                    ← A eval_metrics.py + golden set (fixtures grabadas); ★ B scoring policy (severity-exact)
 ```
 
-Principio: los archivos del seed se mueven casi intactos a `gate/` — cambian imports, rutas hardcodeadas (`parents[2]`, `CONTEXT_FILES`) que pasan a `Config`, y la resolución de severidad (ADR-001). Los tests del seed (`tests/quality_gate/*`) se mueven con ellos y son la primera red de seguridad de la extracción.
+Principio: el código de A se mueve casi intacto a `review/` y `llm/`; cada ★ es un módulo o campo que se porta desde `fix/quality-gate-safety` **junto con sus tests** (`test_egress.py`, `test_diff.py`, `test_contracts.py`, `test_rule_catalog.py`, `test_workflow_security.py` → template), y se puede descartar si no aporta. Los 8 archivos de tests de A (`tests/quality_gate/`) migran en F0.2 y son la red de seguridad.
 
 ### 3.2 Toolchain y dependencias
 
-| Decisión | Elección | Por qué |
-|---|---|---|
-| Build backend | `hatchling` | estándar, sin config exótica, soporta `dynamic = ["version"]` desde tag |
-| Gestor de entorno del repo | `uv` (lockfile `uv.lock`) | velocidad en CI; el template también usa `uv` en los workflows |
-| CLI | `click` | subcomandos, `CliRunner` para tests, ubicuo. Cuidado: exit code de uso (§4.1) |
-| Config TOML | `tomllib` (stdlib) | Python ≥ 3.11 lo garantiza; cero deps |
-| YAML | `pyyaml` (safe_load) | standards.yml y answers de Copier |
-| Validación | `jsonschema` | standards.yml y reporte; el schema de salida del LLM se valida con el mismo motor (reemplaza el validador manual del seed) |
-| Templating | `jinja2` | TEAM-STANDARDS.md generado |
-| Versionado | tag `vX.Y.Z` → versión del wheel (`hatch-vcs`) | ADR-003 §5 |
-
-**Extras** (`pyproject.toml`):
-
-- base: `click`, `pyyaml`, `jsonschema`, `jinja2` — suficiente para `gate` (sin IA), `doctor`, `standards`.
-- `scaffold`: `copier>=9` — requerido por `new` y `upgrade`. Se separa porque CI nunca lo necesita y Copier trae su propio árbol de dependencias. Sin él, `attest new` imprime una línea: `install with: pipx install "py-attest[scaffold]"`.
-- `openai`, `anthropic`, `all` — ADR-002.
-
-Recomendación de instalación en docs: dev → `pipx install "py-attest[scaffold,openai]"` (o `uvx`); CI → `uv sync --extra attest` en el repo generado (ADR-003 §2).
+Sin cambios respecto a v0.1 (hatchling + hatch-vcs, uv, click, tomllib, pyyaml, jsonschema, jinja2), más `packaging` (rangos SemVer en doctor). `pydantic` solo si el rescate de `models.py` de B lo justifica (A valida a mano sin dependencias); decidir en F0.4 y anotarlo en el PR. Extras: base · `scaffold` (copier) · `openai` · `anthropic` · `all`. `fake` no necesita extra.
 
 ### 3.3 Configuración (`[tool.attest]`)
 
 ```toml
 [tool.attest]
-provider = "openai"                 # ADR-002
+provider = "openai"                  # fake | openai | anthropic
 model = "gpt-5-mini"
-max_diff_bytes = 61440
+egress = "raw"                       # raw | minimized        (ADR-004 §3)
+evidence_policy = "degrade"          # degrade (A, default: es lo medido) | fail_closed (★ B)
 base_branch = "main"
-context_files = ["app/models.py", "app/privacy.py"]   # referencias para el reviewer (el seed las tenía hardcodeadas)
+context_files = []                   # solo se usan con egress = "raw"; doctor avisa si parecen sensibles
 standards = { core = "core.standards.yml", domain = "domain.standards.yml", output = "TEAM-STANDARDS.md" }
 reports_dir = "reports/"
+
+[tool.attest.limits]                 # ★ de B: la adquisición se aborta al primer byte por encima
+max_patch_bytes = 1_000_000
+max_files = 200
+max_added_lines = 10_000
+max_line_length = 10_000
+git_timeout = 15.0
+provider_timeout = 30.0
 ```
 
-Overrides por entorno: `ATTEST_PROVIDER`, `ATTEST_MODEL`, `ATTEST_BASE_BRANCH`. Keys **solo** por entorno (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). `config.py` valida tipos y rechaza claves desconocidas (evita typos silenciosos).
+Overrides: `ATTEST_PROVIDER`, `ATTEST_MODEL`, `ATTEST_EGRESS`, `ATTEST_BASE_BRANCH`. Keys solo por entorno. Claves desconocidas → 64.
 
 ## 4. Contratos de la CLI
 
-### 4.1 Exit codes (consolidados — el seed usaba 2 para BLOCK *y* para errores; se separan)
+### 4.1 Exit codes
 
-| Código | Significado | Quién lo emite |
+| Código | Significado | Equivalencia Seed B |
 |---|---|---|
-| 0 | OK · `APPROVE` · `COMMENT` · doctor sin hallazgos S1 | todos |
-| 2 | **BLOCK** — veredicto del gate; doctor con hallazgos S1 en `--strict` | `gate`, `doctor --strict` |
-| 3 | **Incompatibilidad** motor↔template (ADR-003) | `upgrade`, `doctor --compat` |
-| 4 | **Error de ejecución** — proveedor, git, gitleaks ausente, IO, schema del LLM inválido tras reintento | todos |
-| 64 | **Error de uso** (`EX_USAGE`) — flags inválidos, config malformada | `cli/main.py` |
+| 0 | OK · `APPROVE` · `COMMENT` | `approve` (0) |
+| 2 | **BLOCK** (`request_changes`); doctor `--strict` con S1 | `request_changes` (1) |
+| 3 | Incompatibilidad motor↔template (ADR-003) | — |
+| 4 | **Error de ejecución o revisión incompleta** (`inconclusive` ★): proveedor, git, límites excedidos, patch binario/no representable, gitleaks ausente, schema inválido tras reintento. **El check falla; nunca aprueba.** | `inconclusive` (2) |
+| 64 | Error de uso | — |
 
-Click devuelve 2 en errores de uso por defecto — **colisiona con BLOCK**. `cli/main.py` captura `click.UsageError` y sale con 64. Es una línea, pero es un contrato: CI distingue "el gate dijo no" (2) de "el gate se rompió" (4) de "lo invocaste mal" (64).
+Click devuelve 2 en errores de uso: `main.py` los captura → 64.
 
 ### 4.2 Comandos
 
-**`attest gate`** — `--branch <ref> | --diff-file <path>` (excluyentes, requerido) · `--base <ref>` (default: config) · `--out <dir>` · `--description <text>` (intención del autor; en CI, título+cuerpo del PR) · `--no-llm` (solo capas deterministas; también es el comportamiento automático sin key) · `--prompt-version <v>` (default: la empaquetada) · `--json` (imprime el reporte JSON a stdout además de escribirlo). Escribe `<out>/<safe-name>.json` y `.md`. Exit: 0/2/4/64.
+**`attest check`** — `[path]` · `--no-tests` · `--no-lint` · `--json`. Ejecuta ruff, pytest+coverage y gitleaks sobre el árbol de trabajo; produce hallazgos `deterministic` con `rule_id` del núcleo (`testing-1`, `secrets-1`, `code-quality-*`). **Es el único comando que ejecuta código del repo.** Exit 0/2/4/64.
 
-**`attest doctor`** — `[path]` (default: cwd) · `--strict` (S1 → exit 2) · `--compat` (solo checks de compatibilidad, ADR-003) · `--offline` · `--json` · `--only <check-id,...>`. Nunca modifica archivos (v1). Exit: 0/2/3/4/64.
+**`attest review`** — `--branch <ref>` · `--base <ref>` (A) o `--head <sha>` (★ B, para CI con SHAs) · `--diff-file` (fixtures) · `--provider fake|openai|anthropic` · `--fake-response <json>` ★ · `--egress raw|minimized` · `--description` (no confiable: redactado, acotado, delimitado como datos) · `--out <dir>` · `--json` · `--prompt-version` · límites como flags que sobreescriben `[tool.attest.limits]` ★. **No ejecuta código del repo**: git como datos (`--no-ext-diff`, argumentos como lista; ★ `--no-textconv --full-index`, entorno limpio, límites en streaming). Exit 0/2/3/4/64.
 
-**`attest standards build`** — `--check` (regenera en memoria y compara con el committed; exit 2 si difiere) · **`attest standards lint`** — valida core+domain; exit 2 con lista de errores · **`attest standards new-rule <section> "<title>"`** (P1) — añade un esqueleto a `domain.standards.yml`.
+**`attest gate`** — `--branch <ref>` · `--base` · `--out` · `--no-llm`. Comodidad local y para repos privados sin forks: ejecuta `check` y luego `review` sobre `base...branch`, combina hallazgos y emite un solo reporte. Exit = máximo de ambos.
 
-**`attest new <dest>`** — `--variant fastapi|lambda|django` · `--template <url-or-path>` (default: `gh:luicruz01/py-attest-template`) · `--vcs-ref <tag>` · `--defaults` (no interactivo, para CI del template) · pasa el resto a Copier. Tras generar: `doctor --compat` en `<dest>`. Requiere extra `scaffold`. Exit: 0/3/4/64.
+**`attest doctor`**, **`attest standards build|lint|new-rule`**, **`attest new`**, **`attest upgrade`**, **`attest calibrate`**: sin cambios respecto a v0.1 §4.2, salvo `calibrate` que en v1 usa `--provider fake` para verificar el pipeline sin key.
 
-**`attest upgrade`** — `[path]` · `--vcs-ref` · `--defaults` · `--skip-answered` (Copier) · ejecuta `copier update` → rerender → `doctor --compat`; exit 3 si el motor queda fuera del rango nuevo; **nunca instala paquetes**. Exit: 0/3/4/64.
-
-**`attest calibrate`** — P2; en v1 existe como stub que explica qué hará (evita que el nombre se lo lleve otro comando).
-
-### 4.3 Schema del reporte del gate (JSON)
+### 4.3 Schema del reporte (JSON, `schema_version: 3`)
 
 ```jsonc
 {
-  "schema_version": 1,
-  "verdict": "BLOCK",                    // APPROVE | COMMENT | BLOCK  — calculado por gating.py
+  "schema_version": 3,
+  "verdict": "BLOCK",                          // APPROVE | COMMENT | BLOCK | INCONCLUSIVE
   "exit_code": 2,
-  "source": {"kind": "branch", "ref": "feature/streaks", "base": "main"},
-  "layers": {                            // qué corrió y cómo terminó cada capa
-    "lint": "pass", "tests": "pass", "secrets": "pass",
-    "llm": "ran" | "skipped:no_provider_key" | "skipped:secret_detected" | "skipped:diff_too_large" | "skipped:--no-llm"
-  },
+  "stage": "review",                           // check | review | gate
+  "source": {"base_sha": "…", "head_sha": "…", "merge_base_sha": "…", "patch_sha256": "…"},
+  "review_complete": true,                     // false ⇒ INCONCLUSIVE (B): límites, binario, deleción no resuelta…
+  "layers": {"deterministic": "ran", "secrets": "pass",
+             "llm": "ran" | "skipped:no_provider_key" | "skipped:secret_detected" | "skipped:limits_exceeded" | "skipped:--no-llm"},
+  "egress": {"mode": "raw", "context_files": ["app/models.py"]} | {"mode": "minimized", "payload_version": "MINIMIZED_PATCH_V2"},
   "findings": [{
-    "rule_id": "testing-2",              // ADR-001; validado contra el registro
-    "severity": "S2",                    // resuelta desde el registro, no del modelo
-    "confidence": "high",
-    "evidence_verified": true,
-    "file": "app/streaks.py", "line": 10,
-    "title": "...", "evidence": "...", "explanation": "...", "suggested_fix": "..."
+    "rule_id": "testing-2", "severity": "S2",  // severidad = catálogo (fija) …
+    "requires_human_classification": false,    // … o true si la regla es contextual (severity_policy) ⇒ COMMENT
+    "confidence": "high", "evidence_verified": true,
+    "path": "app/streaks.py", "side": "new", "line_start": 10, "line_end": 10,
+    "title": "…", "evidence": "…", "explanation": "…", "suggested_fix": "…", "fingerprint": "…"
   }],
-  "filtered_out": [{"reason": "file_not_in_diff", "finding": {...}}],   // audit trail del postfilter, nunca se borra en silencio
-  "summary": "...",
-  "meta": {                              // provenance (seed + ADR-002 + ADR-003)
-    "engine_version": "1.3.0", "template_version": "v1.5.0", "standards_schema_version": 1,
-    "prompt_version": "v3", "provider": "openai", "model": "gpt-5-mini",
-    "temperature_applied": "model-default", "attempts": 1, "usage": {"input_tokens": 0, "output_tokens": 0},
-    "gate_commit": "699f43d", "generated_at": "2026-09-01T18:20:00Z"
-  }
+  "filtered_out": [{"reason": "range_not_in_changed_lines", "finding": {…}}],   // solo con evidence_policy=degrade; con fail_closed la respuesta entera se invalida (INCONCLUSIVE)
+  "summary": "…",
+  "meta": {"engine_version": "…", "template_version": "…", "standards_schema_version": 1,
+           "prompt_version": "v3", "provider": "openai", "model": "…", "temperature_applied": "…", "attempts": 1,
+           "usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}, "estimated_cost_usd": "0.0000",
+           "gate_commit": "…", "generated_at": "…"}
 }
 ```
 
-El markdown (`report.py`) se deriva del JSON (nunca al revés) y conserva el formato del seed: línea de provenance, veredicto, aviso de "human review requested" cuando hay S1/S2 a baja confianza, tabla de hallazgos, detalles, resumen. `verdict` en el md se recalcula desde `findings` con `gating.verdict` — el seed ya lo hacía así para que md y JSON no puedan contradecirse.
+Nunca se incluyen: el patch original, la respuesta cruda del proveedor, el mapa de alias, prompts, stack traces (B). `ReviewResult.from_json` lee `schema_version` 1.0/2.0 de B para el eval histórico; siempre escribe 3.
 
-### 4.4 Schema del reporte del doctor (JSON)
+### 4.4 Schema del doctor — sin cambios (v0.1 §4.4).
 
-```jsonc
-{ "schema_version": 1, "path": ".", "engine_version": "1.3.0",
-  "checks": [{"id": "compat-engine-range", "severity": "S1", "status": "fail" | "pass" | "skip",
-              "message": "installed py-attest 1.2.0 is outside template range >=1.3,<2",
-              "remedy": "pip install -U 'py-attest>=1.3,<2'", "rule_id": "…"}],   // rule_id si el check respalda una regla deterministic
-  "summary": {"pass": 12, "fail": 1, "skip": 2} }
-```
+## 5. Pipeline en dos etapas — detalle y degradaciones
 
-## 5. Pipeline de `attest gate` — detalle y degradaciones
+**`attest check`** (ejecuta código; job sin secrets):
+
+| # | Capa | Falla → |
+|---|---|---|
+| 1 | ruff check + format --check | S3 → COMMENT, nunca BLOCK |
+| 2 | pytest + coverage `fail_under` | BLOCK con `testing-1` |
+| 3 | gitleaks sobre el árbol | BLOCK con `secrets-1` |
+
+**`attest review`** (no ejecuta código; job con secrets):
 
 | # | Capa | Implementación | Falla → |
 |---|---|---|---|
-| 1 | Resolver diff | `git diff --no-ext-diff base...branch` (o `--diff-file`) | git ausente / ref inválida → exit 4 |
-| 2 | Lint | `ruff check` + `ruff format --check` | S3 → `COMMENT`, nunca BLOCK (TEAM-STANDARDS §6 del seed) |
-| 3 | Tests + coverage | `pytest --cov` con `fail_under` del pyproject | fallo → `BLOCK` con hallazgo `testing-1` (deterministic) |
-| 4 | Secrets (firewall) | gitleaks sobre el diff por stdin, `--redact` | leak → `BLOCK`, **la capa 6 no corre, el diff no se transmite**. gitleaks ausente → **exit 4** (la garantía de seguridad no se degrada en silencio; `doctor` avisa antes) |
-| 5 | Tamaño | `len(diff) > max_diff_bytes` | `COMMENT: diff too large for AI review`, sin llamada |
-| 6 | Proveedor | ADR-002; sin key → `layers.llm = skipped:no_provider_key`, veredicto por capas 2-4 | transitorio → reintentos; permanente → exit 4 |
-| 7 | Validación | jsonschema + `rule_id ∈ Registry` | inválido → 1 reintento → exit 4 con `raw_json` guardado en `<out>/<name>.raw.json` |
-| 8 | Postfilter | evidencia debe citar líneas añadidas; fragmentos con `...`; degrade-not-drop | `evidence_verified=false` → `confidence=low` (visible) |
-| 9 | Veredicto | `TRUST_POLICY_V1[(severity, confidence)]`, máximo entre hallazgos | — |
-| 10 | Artefactos | JSON + md + (opcional) comentario en PR desde el workflow | IO → exit 4 |
+| 1 | Adquisición | A `git diff base...branch --no-ext-diff`; ★ B: SHAs completos, merge-base, límites en streaming, `--no-textconv --full-index` | ref inválida / ★ límite excedido / binario → **INCONCLUSIVE (4)**, sin proveedor |
+| 2 | Deterministic ★ | B: secretos de alta confianza en líneas añadidas, TODOs sin ticket | secreto → BLOCK, **sin proveedor**, material no copiado a evidencia |
+| 3 | Firewall gitleaks (diff) | A `secrets_gate.py` por stdin, `--redact` | leak → BLOCK sin proveedor; gitleaks ausente → 4 |
+| 4 | Egress | `raw` (default): context pack de A · `minimized` ★: B egress con validación residual | `minimized` residual falla → INCONCLUSIVE (4); nunca se envía ni se hace eco del valor |
+| 5 | Proveedor | ADR-002; `fake` para tests/calibrate | sin key → `skipped:no_provider_key`, veredicto por capas 2-3 (exit 0/2); transitorio → reintentos; permanente → 4 |
+| 6 | Validación | schema (A) + `rule_id ∈ registry` (ADR-001) + ★ rangos dentro de líneas cambiadas del lado declarado + severidad desde el catálogo o contextual ⇒ `requires_human_classification` | `degrade` (default, A): hallazgo con evidencia no verificable → `confidence=low` visible, `filtered_out` audita lo estructuralmente inválido · `fail_closed` ★: cualquier fallo invalida la respuesta entera → INCONCLUSIVE |
+| 7 | Policy | `TRUST_POLICY[(severity, confidence)]`; contextual → COMMENT; `review_complete=false` → INCONCLUSIVE aunque no haya hallazgos | — |
+| 8 | Reporte | JSON + md sanitizados; comentario idempotente en PR (B) | IO → 4 |
 
-Las capas 2-3 se ejecutan vía subprocess con los mismos comandos que el Makefile generado — es la definición operativa de "paridad local/CI": **el Makefile llama `attest gate`, y `attest gate` llama a las herramientas**; no hay dos listas de comandos que mantener.
+Aprobación (exit 0 con `APPROVE`) requiere, como en B: adquisición completa, sin límites excedidos, sin binario/deleción no resuelta, proveedor exitoso (o explícitamente omitido sin key/`--no-llm`, y entonces el reporte lo dice), respuesta íntegramente válida y sin S1/S2.
 
 ## 6. Catálogo v1 de checks del doctor
 
-| id | Verifica | Método | Sev. | Respalda regla |
-|---|---|---|---|---|
-| `standards-valid` | core+domain cumplen el schema, IDs únicos, `check` conocidos | `standards.lint` | S1 | — |
-| `standards-in-sync` | TEAM-STANDARDS.md == generado | `standards.build --check` | S2 | — |
-| `compat-engine-range` | motor instalado ∈ `attest_engine_range` | ADR-003 §3 | S1 | — |
-| `compat-pin-consistent` | rango en pyproject == answers | ADR-003 §3 | S2 | — |
-| `template-outdated` | `_commit` < último tag (red) | `git ls-remote --tags`; skip en `--offline` | S3 | — |
-| `coverage-gate` | `[tool.coverage.report].fail_under` presente y ≥ umbral del núcleo | parse pyproject | S2 | `testing-1` |
-| `ruff-configured` | `[tool.ruff]` presente; pre-commit incluye ruff | parse pyproject + `.pre-commit-config.yaml` | S3 | `code-quality-*` |
-| `gitleaks-available` | binario en PATH (local) / paso en workflow (CI) | `shutil.which` + parse workflow | S1 | `secrets-1` |
-| `env-secrets-only` | `.env` en `.gitignore`, `.env.example` existe, ningún `.env` trackeado | git ls-files | S1 | `secrets-1` |
-| `ci-parity` | cada target del Makefile invocado en CI existe, y CI no invoca comandos que no estén en el Makefile | parse Makefile + workflow | S2 | — |
-| `pr-template` | `.github/pull_request_template.md` con checklist de reglas `mode: human` | existencia + IDs presentes | S3 | reglas `human` |
-| `codeowners` | `CODEOWNERS` presente y no vacío | existencia | S3 | — |
-| `python-pinned` | `requires-python` presente | parse pyproject | S3 | — |
-| `tests-present` | `tests/` con ≥ 1 archivo `test_*.py` | fs | S2 | `testing-1` |
-| `no-trivial-asserts` | funciones `test_*` sin `assert`/`pytest.raises`; `assert x is not None` como única aserción | AST (`ast.walk`) | S2 | `testing-2` (parcial: la parte determinista) |
-
-Fuera de v1 (diseñar la salida para admitirlos): `branch-protection` (requiere token de GitHub), `mutation-smoke` (mutmut sobre un módulo), `dependency-audit` (pip-audit, hoy warn-only en el seed).
-
-Cada check es una clase con `id`, `severity`, `run(ctx) -> CheckResult(status, message, remedy)`. `standards.lint` usa el mismo registro para verificar que toda regla `deterministic` apunte a un `check` existente (ADR-001).
+Sin cambios respecto a v0.1 §6, con tres adiciones: `egress-mode-advised` (S3: recomienda `minimized` si `domain.standards.yml` tiene reglas S1 de PII y `egress = raw`), `context-files-sensitive` (S2: un `context_file` coincide con patrones de secretos/PII), `workflow-boundaries` (S1: el workflow generado no ejecuta código en el job `pull_request_target` — reutiliza los asserts de B `test_workflow_security.py`).
 
 ## 7. Template `py-attest-template`
 
-**`copier.yml`** (F1):
+`copier.yml` como v0.1 §7 más `egress: {choices: [raw, minimized], default: raw}` y `fork_reviews: {type: bool, default: false, help: "Review PRs from forks with pull_request_target (never executes PR code)"}`.
 
-```yaml
-_min_copier_version: "9.0"
-_subdirectory: template
-_skip_if_exists: ["domain.standards.yml", "CODEOWNERS", ".env.example"]
-_answers_file: .copier-answers.yml
+**Workflow generado (`attest.yml`):**
 
-project_name: {type: str, help: "Nombre del proyecto (slug)"}
-variant: {type: str, choices: [fastapi], default: fastapi}      # lambda, django en F3
-python_version: {type: str, choices: ["3.11", "3.12", "3.13"], default: "3.12"}
-ai_review: {type: bool, default: true, help: "Instalar el gate de revisión IA (requiere API key en CI)"}
-llm_provider: {type: str, choices: [openai, anthropic], default: openai, when: "{{ ai_review }}"}
-attest_engine_range: {when: false, default: ">=1.0,<2"}          # ADR-003
-```
+| Job | Evento | Permisos | Qué hace |
+|---|---|---|---|
+| `check` | `pull_request`, `push: main` | `contents: read`, sin secrets | checkout del commit del evento; `uv sync`; `attest check`; sube JSON |
+| `review` (default, como A) | `pull_request` | `contents: read`, `pull-requests: write`; `OPENAI_API_KEY` solo en el paso `attest review` | `attest review --branch $HEAD --base $BASE`; comenta con marcador; propaga exit code. **PRs de forks:** sin secrets → `--no-llm`, y el comentario lo dice (limitación documentada de A) |
+| `review` (con `fork_reviews: true` ★, como B) | `pull_request_target` (`opened`, `synchronize`, `ready_for_review`; drafts omitidos) | `contents: read`, `pull-requests: write`; key solo en el paso `attest review` | checkout de `base.sha` sin credenciales persistidas, sin submódulos/LFS; `head.sha` validado (40 hex) y fetcheado con `--no-tags --no-recurse-submodules` como objetos inertes; **nunca checkout ni ejecución del head**; `attest review --head $HEAD_SHA --base $BASE_SHA` |
 
-**Árbol generado** (variante fastapi): `app/` (main, models, settings), `tests/`, `pyproject.toml` (ruff, pytest, coverage `fail_under`, `[tool.attest]`, extra `attest`), `core.standards.yml`, `domain.standards.yml`, `TEAM-STANDARDS.md`, `Makefile` (`setup test lint gate doctor standards hooks`), `.pre-commit-config.yaml` (ruff, gitleaks, commitizen — como el seed), `.github/workflows/attest.yml`, `.github/pull_request_template.md` (checklist desde reglas `human`), `CODEOWNERS`, `.env.example`, `.gitignore`, `README.md`.
-
-**Workflow generado** (`attest.yml`): jobs `lint` (advisory en PR, enforcing en main — política del seed), `test`, `secrets` (gitleaks-action), `gate` (`uv sync --extra attest` → `attest gate --branch $HEAD --base $BASE --description "$PR_TITLE\n$PR_BODY"` → comenta el md en el PR → sube artefactos → propaga exit code). PRs desde forks: sin secrets → `gate` corre con `--no-llm` y lo dice en el comentario (el seed ya documenta esta limitación). `doctor --strict` corre en `main` semanalmente, no en cada PR.
-
-**CI del propio template** (ADR-003 §Action Items 6): genera con `--defaults`, instala motor mínimo del rango, corre `gate`, `doctor --compat`, `standards build --check`; y un job de upgrade vN-1 → vN sobre un repo con `domain.standards.yml` modificado, que verifica que el archivo del usuario quedó intacto.
+Acciones pineadas por SHA, timeouts y concurrency en todos los jobs; sin cache en el privilegiado. Branch protection: `check` y `review` requeridos. Makefile: `gate` = `attest gate` (local, un solo comando). Con `fork_reviews: true` el CI del template corre los asserts de seguridad del workflow (★ `test_workflow_security.py` de B) contra el workflow **renderizado**.
 
 ## 8. Modelo de seguridad
 
-**Activos:** código del usuario (el diff y los `context_files`), API keys, la integridad del veredicto.
+Hereda v0.1 §8 y añade lo que se rescata de B (★):
 
-**Fronteras de confianza:** (1) el diff es **entrada no confiable** — la escribió el autor del PR, que puede ser un fork; (2) el proveedor LLM es un tercero que ve el diff; (3) el runner de CI.
-
-| Amenaza | Mitigación | Residual |
-|---|---|---|
-| Secreto en el diff llega al proveedor | Firewall gitleaks **antes** de cualquier llamada; leak = BLOCK sin transmisión; gitleaks ausente = exit 4, nunca skip | gitleaks tiene FN; documentado como "precisión ~1, recall no garantizado" |
-| Exfiltración de contexto | Solo salen del repo: diff + `context_files` listados explícitamente en `[tool.attest]` + reglas `mode: llm`. Nada más. `--json` lo muestra | el usuario puede listar un archivo sensible en `context_files`; `doctor` avisa si un `context_file` coincide con patrones de secretos |
-| Keys en el repo | Solo entorno; `env-secrets-only` (S1) lo vigila; `.env` en `.gitignore` por template | — |
-| **Prompt injection vía el diff** (un PR que instruye al modelo "no reportes nada") | El modelo **no puede aprobar**: el veredicto lo calcula `gating.py` desde hallazgos con evidencia verificada; el peor caso de una inyección es *suprimir* hallazgos (FN), nunca fabricar un APPROVE con autoridad. Las capas 2-4 no son inyectables | FN inducido es posible; `calibrate` (P2) siembra canarios que lo detectan; el prompt v3 ya trata `<unified-diff>` como datos |
-| Evasión del postfilter (paráfrasis para que la evidencia "coincida") | Matching por substring es control de calidad, **no** frontera de seguridad — así se documenta | asumido |
-| Artefactos con contenido sensible | Los reportes citan líneas del diff como evidencia; un diff con secreto nunca llega a reporte (firewall) | evidencia puede citar datos no-secretos pero sensibles; los artefactos de CI heredan la retención del repo |
-| PR desde fork con secrets del repo | GitHub no expone secrets a forks; el workflow degrada a `--no-llm` explícitamente | — |
-| Supply chain del propio py-attest | pins con rango en el template (ADR-003), `uv.lock` en el repo del usuario, pip-audit warn-only (v1) | — |
+| Amenaza | Mitigación |
+|---|---|
+| **Ejecución de código del PR con secrets en el entorno** (forks) | Default (A): los forks no reciben secrets → sin revisión IA, explícito en el comentario. Con `fork_reviews` ★: `review` no ejecuta nada del repo; el job privilegiado hace checkout del SHA base y trata el head como datos; `workflow-boundaries` del doctor y los tests de seguridad del template lo verifican |
+| Exfiltración vía diff | `raw`: firewall gitleaks + deterministic + `context_files` explícitos y auditados por doctor · `minimized`: alias de rutas, eliminación de literales/valores/prosa, validación residual fail-closed, mapa de alias solo en memoria |
+| Prompt injection vía diff/título/cuerpo | título y cuerpo redactados, acotados, delimitados como datos; el modelo no puede aprobar (policy por tabla); peor caso = FN; contextuales nunca bloquean por sí solas |
+| Alias desconocido o rango fuera del diff en la respuesta | invalidación atómica (fail_closed) o degradación visible (degrade) — nunca silencio |
+| Artefactos | nunca contienen patch original, respuesta cruda, alias, prompts, stack traces; el comentario del PR se sanitiza de forma independiente |
+| Proveedor | Responses API con `store=False`, sin tools, sin `previous_response_id`; sin reclamo de ZDR (documentado como en B) |
 
 ## 9. Estrategia de pruebas
 
-- **Unitarias** por módulo; los tests del seed migran con el código en F0 (postfilter multi-fragmento, gating, schema, secrets gate, context pack, eval metrics).
-- **Contrato de proveedores** (ADR-002): suite común + fixtures grabadas; sin red en CI de PRs.
-- **Regresión del golden set**: los 8 PRs del seed con respuestas del proveedor grabadas → veredictos y hallazgos esperados byte a byte; job semanal contra proveedores reales publica métricas en EVAL.md.
-- **CLI**: `CliRunner` por comando, incluyendo la tabla de exit codes completa (§4.1) — cada código tiene al menos un test que lo produce.
-- **Template**: los jobs cruzados de ADR-003 + quickstart cronometrado (< 15 min, PRD G1).
-- **Doctor**: un fixture de repo por check en estado pass y fail.
+v0.1 §9 más: los 8 archivos de tests de A migran con el código en F0.2; de B se traen, **junto con cada rescate**, `test_egress.py`, `test_diff.py`, `test_contracts.py` (side/rangos), `test_rule_catalog.py`, `test_github_comment.py`, `test_anti_leakage.py` y `test_workflow_security.py` (al template). **Anti-leakage** como test: el paquete instalable no importa ni lee `eval/`; el golden set es regresión ("no empeorar vs baseline sellado por modo": `raw` = EVAL de A), y la comparación de prompts/reglas/modelos usa un holdout nuevo sellado (F2).
 
-## 10. Riesgos técnicos y qué revisar al crecer
+## 10. Riesgos técnicos
 
-| Riesgo | Señal | Plan |
-|---|---|---|
-| `ci-parity` por parsing de Makefile/workflow es frágil | falsos positivos en repos no generados por el template | v1: solo en repos con answers file; heurístico en el resto, severidad S3 |
-| `no-trivial-asserts` con demasiados FP | quejas en repos con fixtures ricas | lista de allow por decorador/marker; medir en los 10 repos OSS de F2 |
-| Copier cambia la semántica de `when: false`/`_skip_if_exists` | job de upgrade del template falla | pin `_min_copier_version` y rango de copier en el extra `scaffold` |
-| Variancia del LLM entre proveedores desalinea la trust policy | métricas por proveedor divergen en el job semanal | política por proveedor solo si los datos lo exigen; hoy una tabla |
-| Diff grande recurrente en repos reales | muchos `skipped:diff_too_large` | F2: revisar por archivo o por hunk con presupuesto; no en v1 |
+v0.1 §10 más: (a) dos modos de egress y dos políticas de evidencia — cada combinación necesita su fila en EVAL.md; (b) `pull_request_target` es delicado — si `fork_reviews` está activo, el test de seguridad del workflow es obligatorio en el CI del template; (c) portar los rescates de B sin sus invariantes (rangos por lado, alias solo en memoria, validación residual) — por eso cada rescate viaja con sus tests; (d) el default `raw` puede ser inaceptable para algunos usuarios — el doctor lo señala y el README lo explica en la primera pantalla.
 
-## 11. Plan de implementación F0-F1 (paquetes de trabajo)
+## 11. Plan de implementación F0-F1
 
 | WP | Entregable | Depende de |
 |---|---|---|
-| F0.1 | Esqueleto `py_attest/` + `pyproject` (hatchling, extras, click, exit codes en `main.py`) + CI del paquete | — |
-| F0.2 | Migrar `gate/` desde el seed con sus tests; `Config` reemplaza rutas hardcodeadas | F0.1 |
-| F0.3 | `llm/` según ADR-002 (types, policy, registry, openai portado, anthropic nuevo, contract tests) | F0.1 |
-| F0.4 | `standards/` según ADR-001 (schema, registry, build, lint); `gate` resuelve severidad desde el registro | F0.2 |
-| F0.5 | Golden set como fixtures grabadas + `eval/` migrado; job semanal | F0.3, F0.4 |
-| F0.6 | Release `v1.0.0` a PyPI | F0.2-F0.5 |
-| F1.1 | `py-attest-template` variante fastapi: copier.yml, árbol, workflows, Makefile, `core.standards.yml` inicial | F0.6 |
-| F1.2 | `attest new` + `doctor --compat` (subset del catálogo: `compat-*`, `standards-*`) | F1.1 |
-| F1.3 | Self-hosting: ambos repos corren `attest gate` en sus PRs | F1.1, F1.2 |
-| F1.4 | Quickstart cronometrado en CI del template; docs de instalación | F1.3 |
-
-`upgrade`, el catálogo completo del doctor y `standards new-rule` son F2, como fija el PRD.
+| F0.1 | Esqueleto + CI + exit codes (incluye 4 = inconclusive) | — |
+| F0.2 | **Migrar Seed A** `tools/quality_gate/` → `py_attest/review/` + `llm/` con sus 8 tests; `check/` nuevo (ruff/pytest/gitleaks); `attest check`, `attest review`, `attest gate`; exit codes 2/4 | F0.1 |
+| F0.3 | `llm/` según ADR-002 (★ forma de B, `fake` ★, Anthropic nuevo, OpenAI de A con `store=False` ★); egress `minimized` ★ con `test_egress.py`; git acotado ★ con `test_diff.py` | F0.2 |
+| F0.4 | `standards/` según ADR-001 (+ campos ★); `migrate_review_rules` ★; validación con `rule_id` y severidad de catálogo; contextuales; `side` ★ y rangos por lado con `test_contracts.py`; `evidence_policy` degrade/fail_closed | F0.2 |
+| F0.5 | Golden set de A (8 patches; ★ integridad por `patch_sha256` de B) como fixtures; `expected.json`; **medición de `minimized` con prompt v3** (su baseline); EVAL.md con ambos; job semanal; anti-leakage ★ | F0.3, F0.4 |
+| F0.6 | Release `v1.0.0` | todo lo anterior |
+| F1.x | Como v0.1 §11 con el workflow de §7 (`fork_reviews` opcional ★) | F0.6 |
 
 ---
-*Historial: v0.1 (2026-09-01). Fuentes: PRD v0.3, ADR-001/002/003, seed `student-progress-seed` (review.py, llm.py, schema.py, postfilter.py, secrets_gate.py, context_pack.py, gating.py, Makefile, ci.yml, pyproject.toml).*
+*Historial: v0.1 (2026-09-01) → v0.2 (2026-09-01, ADR-004 con timeline invertido) → v0.3 (2026-09-02, ADR-004 corregido: Seed A base). Fuentes: Seed A (`main`: `tools/quality_gate/*`, `tests/quality_gate/*`, `EVAL.md`, `DECISIONS.md`); Seed B (`fix/quality-gate-safety`: `quality_gate/README.md`, `models.py`, `policy.py`, `rules.py`, `providers/base.py`, `cli.py`, `EVAL.md`, `DECISIONS.md`, `eval/README.md`).*

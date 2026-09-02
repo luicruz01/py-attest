@@ -4,6 +4,7 @@
 **Date:** 2026-09-01
 **Deciders:** Luis Cruz
 **Parte de:** TRD py-attest · PRD v0.3 §7.1, §11.1
+**Amended by ADR-004 (2026-09-02):** Seed B (rama `fix/quality-gate-safety` del seed) tiene un catálogo (`quality_gate/review_rules.json`) que es la autoridad local de severidad — la misma idea de este ADR. Se rescata: `standards.yml` hereda tres campos por regla: `evidence_required` y `non_examples` (se inyectan al prompt junto con `description`), y `severity_policy` como alternativa a `severity` para reglas de **severidad contextual**: el proveedor no puede clasificarlas; producen `requires_human_classification=true` y cuentan como COMMENT hasta que un check determinista las resuelva. `migrate_review_rules.py` convierte el catálogo de B en `core/domain.standards.yml` (F0.4). Los IDs de B (`LOG_PII`, `EXTERNAL_INPUT_VALIDATION`) se mapean a la convención de este ADR (`pii-1`, `code-quality-3`) con una tabla en el eval para leer artefactos históricos.
 
 ## Context
 

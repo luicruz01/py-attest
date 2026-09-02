@@ -1,8 +1,8 @@
-# PRD v0.3 — py-attest
+# PRD v0.5 — py-attest
 
 **Producto:** `py-attest` — CLI de scaffolding y quality gate para repos Python
 **Estado:** Cerrado para el TRD — sin preguntas de producto bloqueantes pendientes · **Autor:** Luis Cruz (con Claude) · **Fecha:** 2026-09-01
-**Cambios vs v0.2:** las 4 preguntas de producto bloqueantes resueltas (orden de F1, default del gate IA, licencia, ubicación de config); las 4 decisiones técnicas bloqueantes resueltas como pre-ADRs (formato TEAM-STANDARDS.md, interfaz de proveedor LLM, import name, compatibilidad paquete↔template); handles de GitHub y colisión de binario verificados.
+**Cambios vs v0.4:** timeline de los seeds corregido (Seed B = 9 ago, intento anterior; Seed A = 12 ago, entrega final en `main`); base de código = **Seed A con rescates de Seed B** (ADR-004 reescrito). Se mantienen: R6 partido en dos etapas (`check` ejecuta código sin secrets, `review` no ejecuta código con secrets); egress al proveedor configurable, `raw` por default; G3 reformulado como "no empeorar vs baseline sellado por modo" con re-medición obligatoria en F0.5; política anti-leakage del golden set.
 
 ---
 
@@ -12,7 +12,7 @@ Los templates de proyecto (Cookiecutter y derivados) generan un repo y se despid
 
 El costo de no resolverlo: cada proyecto nuevo re-paga el setup de calidad (~días), los estándares dependen de quién revisa cada PR, y no existe evidencia verificable de que el proceso de revisión funciona.
 
-**Evidencia:** el gap fue validado construyendo el motor completo (ejercicio Open English, ago 2026): gate por capas con eval publicado — 100% recall de bloqueo (6/6), 87.5% accuracy de veredicto en el golden set. Ninguna herramienta comercial publica métricas equivalentes.
+**Evidencia:** el gap fue validado construyendo el motor dos veces (ejercicio Open English, ago 2026) sobre el mismo golden set de 8 PRs. Primero **Seed B** (9 ago; minimización agresiva del diff antes del envío, fail-closed, corrida ciega sellada): 50% precisión, 41.67% recall, 36% de recall bloqueante y una aprobación insegura — su propio análisis atribuye la pérdida a la visibilidad que quita la minimización. Después **Seed A** (12 ago, la entrega final; diff crudo al proveedor tras gitleaks, postfilter degrade-not-drop, gpt-5-mini): 6/6 bloqueos, 87.5% de acierto de veredicto, F1 de hallazgos 72 (strict). La lección es el producto: el trade-off privacidad↔recall es real, debe ser una opción explícita del usuario, y cada modo tiene que publicar sus números. Ninguna herramienta comercial publica métricas equivalentes ni expone ese trade-off.
 
 ## 2. Visión y objetivo
 
@@ -26,7 +26,7 @@ Proyecto open-source (MIT), construido en abierto al estilo Tequio: DECISIONS.md
 
 1. **G1 — Setup en minutos:** de `attest new` a primer PR gateado en < 15 min (medido de clean clone, ya validado en el seed: 66 s el quickstart).
 2. **G2 — Adopción en repos existentes:** `attest doctor` produce un reporte accionable sobre cualquier repo Python sin requerir regeneración ni adopción total.
-3. **G3 — Confianza medible en el revisor IA:** cada release del motor publica precision/recall contra el golden set; regresión dura: recall de bloqueo S1/S2 = 100%.
+3. **G3 — Confianza medible en el revisor IA:** cada release publica precision/recall del golden set **por modo de egress** (`raw`, `minimized`); regresión dura: ningún modo empeora respecto a su baseline sellado, y `raw` mantiene el recall de bloqueo S1/S2 de Seed A (6/6) tras la re-medición de F0.5. El golden set nunca se usa para elegir prompts, reglas o umbrales (anti-leakage, ADR-004 §6): esas comparaciones exigen un holdout nuevo sellado.
 4. **G4 — Actualizable sin dolor:** el núcleo de calidad llega a repos ya generados vía `attest upgrade` (Copier update) y `pip install -U`, respetando cambios locales.
 5. **G5 — Portfolio:** el repo demuestra el modo de trabajo del autor ante evaluadores técnicos (métrica blanda: menciones/uso en entrevistas y outreach).
 
@@ -72,7 +72,7 @@ Proyecto open-source (MIT), construido en abierto al estilo Tequio: DECISIONS.md
 | R3 | **Golden set como regresión del motor**: los 8 PRs del seed corren en el CI del paquete; release bloqueado si recall de bloqueo S1/S2 < 100%. | `make eval` reproduce las métricas publicadas byte a byte desde clean clone. |
 | R4 | **`attest new`** (variante FastAPI primero): genera repo vía Copier con pre-commit, ruff, mypy, pytest+coverage gate, gitleaks, workflows CI, plantilla de PR, CODEOWNERS, TEAM-STANDARDS.md, Makefile con paridad local/CI. | Dado `attest new` en máquina limpia con Python 3.11+, el repo generado pasa su propio `attest gate` sin ediciones, en <15 min incluyendo instalación. |
 | R5 | **TEAM-STANDARDS.md parseable**: reglas con ID estable, severidad (S1/S2/S3), modo (`deterministic`/`llm`/`human`); núcleo universal versionado + secciones de dominio del usuario preservadas en upgrade. | `attest lint-standards` rechaza IDs duplicados, severidades inválidas, reglas `deterministic` sin check instalado. Los hallazgos del gate citan IDs de regla. |
-| R6 | **`attest gate`**: pipeline completo local y en CI (un solo motor, dos modos), reportes md+JSON estampados con versión de prompt, modelo, config. | Mismo diff → mismo veredicto local vs CI (tolerancia de variancia documentada del seed). Diff > límite degrada a COMMENT con explicación, no falla. |
+| R6 | **Gate en dos etapas** (ADR-004): `attest check` ejecuta ruff/tests/gitleaks sobre el árbol y corre **sin secrets**; `attest review` adquiere el diff como datos, nunca ejecuta código del PR, y corre **con secrets**; `attest gate` = ambos en local. Reportes md+JSON con provenance completa. Egress configurable (`raw` default, `minimized` opcional). | Mismo diff → mismo veredicto local vs CI (variancia acotada a la capa LLM). El job con secrets del workflow generado no contiene ningún paso que ejecute código del PR (verificado por test). Límites excedidos o patch no representable → `INCONCLUSIVE` (exit 4, check rojo), nunca aprobación. |
 | R7 | **Self-hosting**: los repos `py-attest` y `py-attest-template` corren su propio gate en cada PR desde F1. | Badge y artefactos de review visibles en PRs reales del proyecto. |
 
 ### P1 — Should have (fast follow)
@@ -105,7 +105,9 @@ Proyecto open-source (MIT), construido en abierto al estilo Tequio: DECISIONS.md
 - **Import:** `py_attest` (nunca `attest`, evita cualquier ambigüedad con el paquete viejo). **Binario/comando:** `attest`. **Paquete PyPI:** `py-attest`.
 - Repos `github.com/luicruz01/py-attest` y `github.com/luicruz01/py-attest-template` — ambos nombres libres, confirmado.
 
-**Decisiones técnicas bloqueantes — pre-ADRs (formalizar con `engineering:architecture` en el TRD):**
+**Base de código (ADR-004):** Seed A (`~/Documents/Personal/Code/student-progress-seed` en `main`, `tools/quality_gate/`) como base; de Seed B (rama `fix/quality-gate-safety`) se rescatan el catálogo con severidad contextual, el Protocol + `fake`, el egress `minimized`, el git acotado, `side` old/new y el job `pull_request_target` opcional. Supuesto nuevo a validar (F0.5): "el modo `raw` con firewall gitleaks es aceptable para la mayoría de los usuarios; `minimized` cubre a quien maneja datos sensibles".
+
+**Decisiones técnicas bloqueantes — pre-ADRs (formalizados como ADR-001/002/003; ADR-004 los ajusta a Seed B):**
 
 1. **TEAM-STANDARDS.md se genera, no se edita a mano.** Fuente de verdad: `standards.yml` (cada regla: id, severidad, modo `deterministic`/`llm`/`human`, texto, rationale; para las deterministas, el check que la verifica). `attest standards build` genera el Markdown legible con encabezado "GENERADO — edita standards.yml". Un check de CI regenera y compara; si difieren, falla — mantiene el doc siempre en sync sin fiarse de la disciplina humana. Precedente: es el mismo patrón que usa Semgrep (reglas YAML con metadata). `lint-standards` valida contra JSON Schema, no contra un parser de Markdown.
 2. **Interfaz de proveedor LLM propia y mínima, no litellm por default.** litellm-el-SDK es una librería (no un servicio: no se "levanta" nada en CI), pero es una dependencia pesada para lo poco que necesitamos: mandar un prompt, recibir JSON validado contra schema. v1: interfaz propia (~100 líneas por proveedor, como ya existe en el seed para OpenAI) con OpenAI y Anthropic soportados. litellm queda como extra opcional (`pip install py-attest[litellm]`) si algún usuario lo pide, nunca impuesto.
@@ -144,8 +146,8 @@ Proyecto open-source (MIT), construido en abierto al estilo Tequio: DECISIONS.md
 
 Sin deadline duro externo; el forcing function es tener F0-F1 utilizables para los propios proyectos de Luis y material publicable. Licencia MIT en ambos repos desde el primer commit.
 
-- **F0 — Extracción del motor** (cirugía, no invención): `tools/quality_gate/` del seed → paquete `py-attest` (import `py_attest`, comando `attest`); interfaz de proveedor propia (OpenAI + Anthropic); golden set como CI de regresión; publicar a PyPI. Repos creados: `luicruz01/py-attest`, `luicruz01/py-attest-template`.
-- **F1 — Template + CLI mínima (prioridad — uso propio inmediato):** variante FastAPI, `new` + `gate`, gate IA on por default con degradación sin key, `standards.yml` → TEAM-STANDARDS.md generado + `lint-standards`, config en `[tool.attest]`, self-hosting.
+- **F0 — Extracción del motor** (cirugía, no invención): `tools/quality_gate/` de **Seed A** → `py_attest/review/` + `llm/` (import `py_attest`, comando `attest`), con `check/` nuevo; rescates de Seed B (catálogo, `fake`, egress `minimized`, git acotado, `side`) como módulos opcionales; Anthropic nuevo; **medición de `minimized` con prompt v3** sobre el golden set; publicar a PyPI. Repos: `luicruz01/py-attest`, `luicruz01/py-attest-template`.
+- **F1 — Template + CLI mínima (prioridad — uso propio inmediato):** variante FastAPI, `new` + workflow de dos jobs (`check` sin secrets; `review` con secrets en `pull_request`, o en `pull_request_target` con las salvaguardas de Seed B si `fork_reviews: true`), gate IA on por default con degradación sin key, `standards.yml` → TEAM-STANDARDS.md generado + `lint-standards`, config en `[tool.attest]`, self-hosting.
 - **F2 — Actualizable + auditable:** `upgrade` (rangos SemVer + diff), `doctor` v1 (reporte, catálogo v1 de checks), experimento de doctor sobre 10 repos OSS (valida la tesis de adopción antes de invertir más en doctor).
 - **F3 — Cobertura:** variantes lambda/Django, `doctor --fix`, `calibrate`.
 - **F4 — Lanzamiento:** README nivel Tequio, posts (TrueHome → py-attest), reportes doctor como contenido.
@@ -166,4 +168,4 @@ El PRD ya no tiene preguntas de producto pendientes. Lo que queda es especificar
 Con el nombre, los repos, la licencia y las 4 decisiones de producto cerrados, el siguiente paso natural es abrir el TRD formalizando los pre-ADRs del §7 con `engineering:architecture`, empezando por el de `standards.yml` — es del que cuelgan más de los otros.
 
 ---
-*Historial: v0.1 (2026-09-01, brainstorm inicial) → v0.2 (2026-09-01, nombre py-attest, estructura de spec completa) → v0.3 (2026-09-01, PRD cerrado: preguntas de producto resueltas, pre-ADRs técnicos definidos, handles verificados). Derivado del seed `student-progress-seed` (motor + EVAL.md + DECISIONS.md) e investigación de ecosistema (Copier/cruft/projen/Backstage, revisión IA).*
+*Historial: v0.1 (2026-09-01, brainstorm inicial) → v0.2 (2026-09-01, nombre py-attest, estructura de spec completa) → v0.3 (2026-09-01, PRD cerrado: preguntas de producto resueltas, pre-ADRs técnicos definidos, handles verificados) → v0.4 (2026-09-01, ADR-004 con timeline invertido) → v0.5 (2026-09-02, ADR-004 corregido: Seed A base, rescates de B). Derivado del seed `student-progress-seed` (motor + EVAL.md + DECISIONS.md) e investigación de ecosistema (Copier/cruft/projen/Backstage, revisión IA).*

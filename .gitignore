@@ -28,3 +28,6 @@ reports/
 .DS_Store
 .idea/
 .vscode/
+
+# Superpowers SDD scratch workspace
+.superpowers/

@@ -18,7 +18,12 @@ class SecretsGateError(RuntimeError):
     """Raised when the deterministic secrets scan cannot complete."""
 
 
-def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # noqa: ARG001
+def findings_for_diff(
+    diff: str,
+    repo_root: Path,  # noqa: ARG001
+    *,
+    require_location: bool = True,
+) -> list[dict[str, Any]]:
     """Run Gitleaks on ``diff`` via stdin and return redacted S1 findings.
 
     ``repo_root`` is accepted for API stability but deliberately NOT used as the
@@ -29,6 +34,19 @@ def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # no
     matching the leaked secret's fingerprint, would silently disable this firewall and
     let a real secret reach the LLM provider. The scan is stdin-only and needs no files
     from the repo, so it runs from a throwaway directory the reviewed repo cannot reach.
+
+    ``require_location`` gates what happens when a detected secret's source line can't be
+    located within ``diff``. For the primary, diff-scoped firewall call (the default,
+    ``True``), a real diff's hits should always be locatable, so an unlocatable hit is
+    suspicious and this raises. `reviewer.py` also reuses this function to scan the
+    broader assembled review *context* (rules block + context_files + diff +
+    --description) for secrets outside the diff -- content there (e.g. a context_files
+    entry, rendered before <unified-diff>) is legitimately never locatable by a
+    diff-line walk. That caller passes ``require_location=False`` to get a structurally
+    valid (non-null) placeholder finding back instead of an exception; it always routes
+    the result through `_blocked_review(..., anchor_to_diff=False)`, which unconditionally
+    overwrites path/side/line_start/line_end with an honest "can't be trusted" placeholder
+    -- so the values built here for that case never reach a report.
     """
     gitleaks_executable = shutil.which("gitleaks")
     if gitleaks_executable is None:
@@ -71,16 +89,24 @@ def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # no
             raise SecretsGateError("gitleaks returned an invalid leak entry")
         detector = _safe_detector_name(leak_value.get("RuleID"))
         diff_line = _positive_int(leak_value.get("StartLine"))
-        file_name, source_line = _location_for_diff_line(diff, diff_line)
-        if file_name is None:
-            file_name = _fallback_file(diff, leak_value.get("File"))
+        located = _located_line_for_diff_line(diff, diff_line)
+        if located is None:
+            if require_location:
+                raise SecretsGateError(
+                    f"cannot locate a source line for a detected secret ({detector}); "
+                    "the diff-scoped firewall requires a real side/line to report"
+                )
+            file_name, side, source_line = _fallback_file(diff, leak_value.get("File")), "new", 1
+        else:
+            file_name, side, source_line = located
         evidence = _safe_evidence_for_diff_line(diff, diff_line)
         findings.append(
             {
-                "rule": "5-secrets",
-                "severity": "S1",
-                "file": file_name,
-                "line": source_line,
+                "rule_id": "secrets-1",
+                "path": file_name,
+                "side": side,
+                "line_start": source_line,
+                "line_end": source_line,
                 "title": f"Secret detected ({detector}, occurrence {index})",
                 "evidence": evidence,
                 "explanation": (
@@ -89,6 +115,9 @@ def findings_for_diff(diff: str, repo_root: Path) -> list[dict[str, Any]]:  # no
                 ),
                 "suggested_fix": "Remove and rotate the secret before requesting another review.",
                 "confidence": "high",
+                "severity": "S1",
+                "requires_human_classification": False,
+                "evidence_verified": True,
             }
         )
     return findings
@@ -172,6 +201,43 @@ def _location_for_diff_line(diff: str, target_line: int | None) -> tuple[str | N
         if diff_line == target_line:
             return new_file or old_file, None
     return new_file or old_file, None
+
+
+def _located_line_for_diff_line(diff: str, target_line: int | None) -> tuple[str, str, int] | None:
+    """Like _location_for_diff_line, but also returns which side ("old"/"new") matched,
+    and returns None (not a partial file-only result) when no real source line was found --
+    the diff-scoped firewall has no file-level/null-location escape hatch (spec §4.1).
+    """
+    if target_line is None:
+        return None
+    old_file: str | None = None
+    new_file: str | None = None
+    old_line: int | None = None
+    new_line: int | None = None
+    for diff_line, text in enumerate(diff.splitlines(), start=1):
+        if text.startswith("--- "):
+            old_file = _header_path(text[4:])
+        elif text.startswith("+++ "):
+            new_file = _header_path(text[4:])
+        else:
+            match = _HUNK_HEADER.match(text)
+            if match:
+                old_line, new_line = (int(value) for value in match.groups())
+            elif old_line is not None and new_line is not None:
+                if text.startswith("+"):
+                    if diff_line == target_line and new_file is not None:
+                        return new_file, "new", new_line
+                    new_line += 1
+                elif text.startswith("-"):
+                    if diff_line == target_line and old_file is not None:
+                        return old_file, "old", old_line
+                    old_line += 1
+                elif not text.startswith("\\"):
+                    if diff_line == target_line and new_file is not None:
+                        return new_file, "new", new_line
+                    old_line += 1
+                    new_line += 1
+    return None
 
 
 def _header_path(header: str) -> str | None:

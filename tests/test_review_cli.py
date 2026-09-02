@@ -142,6 +142,90 @@ def test_review_fake_provider_is_not_implemented_yet(
     assert "F0.3" in result.output
 
 
+def test_review_evidence_policy_flag_does_not_collide_with_no_llm(tmp_path: Path) -> None:
+    # Renamed from test_review_evidence_policy_flag_overrides_config (final whole-branch
+    # review): with --no-llm, run_review's `no_llm` branch returns before
+    # resolved_evidence_policy is ever consulted, so this exercises no override behavior
+    # at all -- it only confirms --evidence-policy is accepted as a flag and doesn't
+    # break --no-llm's own short-circuit path. See
+    # test_review_evidence_policy_flag_actually_overrides_the_config_default below for
+    # a test that exercises the real override.
+    #
+    # Runs with the real py-attest repo as cwd (as in
+    # test_review_diff_file_no_llm_approves_a_clean_patch above): gate_commit's
+    # `git rev-parse HEAD` needs an actual git repo, which a bare tmp_path isn't.
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "review",
+            "--diff-file",
+            str(FIXTURES / "streaks.patch"),
+            "--no-llm",
+            "--evidence-policy",
+            "fail_closed",
+            "--out",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0
+
+
+def test_review_evidence_policy_flag_actually_overrides_the_config_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression test for a final whole-branch review finding: no test anywhere
+    # exercised --evidence-policy actually overriding Config.evidence_policy (the
+    # "degrade" default) through the CLI -- the only fail_closed coverage went through
+    # Config(evidence_policy=...) directly, never the flag. This drives the LLM call
+    # (via a monkeypatched review_context, as in tests/review/test_reviewer.py's
+    # fail_closed test) with an invalid finding and asserts the flag alone flips the
+    # verdict to INCONCLUSIVE, proving the override reaches run_review.
+    from py_attest.review import reviewer as review_module
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
+    monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
+    bad_finding = {
+        "rule_id": "does-not-exist-1",
+        "path": "app/main.py",
+        "side": "new",
+        "line_start": 1,
+        "line_end": 1,
+        "title": "Review policy violation",
+        "evidence": "changed value",
+        "explanation": "The changed code violates a team standard.",
+        "suggested_fix": "Change the implementation to follow the standard.",
+        "confidence": "high",
+    }
+    monkeypatch.setattr(
+        review_module,
+        "review_context",
+        lambda *_a, **_kw: {"findings": [bad_finding], "summary": "One violation."},
+    )
+    out_dir = tmp_path / "out"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "review",
+            "--diff-file",
+            str(FIXTURES / "streaks.patch"),
+            "--evidence-policy",
+            "fail_closed",
+            "--out",
+            str(out_dir),
+        ],
+    )
+
+    assert result.exit_code == 4
+    report = json.loads((out_dir / "streaks.patch.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "INCONCLUSIVE"
+
+
 def test_review_json_flag_prints_the_schema_v3_report(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     runner = CliRunner()

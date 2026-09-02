@@ -7,16 +7,25 @@ import click
 from py_attest import __version__
 from py_attest.check.runner import CheckExecutionError, run_check
 from py_attest.config import Config, load_config
-from py_attest.errors import AttestError, BlockedError, IncompatibleError, InconclusiveError
+from py_attest.errors import (
+    AttestError,
+    BlockedError,
+    IncompatibleError,
+    InconclusiveError,
+    StandardsDriftError,
+)
 from py_attest.review.diff import DiffError, _branch_diff
 from py_attest.review.reviewer import run_review
+from py_attest.standards.build import build as build_standards
+from py_attest.standards.lint import lint as lint_standards
+from py_attest.standards.registry import RegistryError
 
 
 def exit_code_for(exc: BaseException) -> int:
     """Map an exception to its contractual exit code (TRD §4.1)."""
     if isinstance(exc, click.UsageError):
         return 64
-    if isinstance(exc, BlockedError):
+    if isinstance(exc, (BlockedError, StandardsDriftError)):
         return 2
     if isinstance(exc, IncompatibleError):
         return 3
@@ -82,6 +91,7 @@ def check(path: str | None, no_tests: bool, no_lint: bool, as_json: bool) -> int
 @click.option("--provider", type=click.Choice(["fake", "openai", "anthropic"]))
 @click.option("--fake-response")
 @click.option("--egress", type=click.Choice(["raw", "minimized"]))
+@click.option("--evidence-policy", type=click.Choice(["degrade", "fail_closed"]))
 @click.option("--description")
 @click.option("--out", type=click.Path())
 @click.option("--json", "as_json", is_flag=True)
@@ -97,6 +107,7 @@ def review(
     provider: str | None,
     fake_response: str | None,
     egress: str | None,
+    evidence_policy: str | None,
     description: str | None,
     out: str | None,
     as_json: bool,
@@ -139,6 +150,7 @@ def review(
         prompt_version=prompt_version or "v3",
         no_llm=no_llm,
         provider=provider,
+        evidence_policy=evidence_policy,
         branch_source=branch_source,
         as_json=as_json,
     )
@@ -254,15 +266,39 @@ def standards() -> None:
 
 
 @standards.command()
-def build() -> None:
+@click.option("--check", is_flag=True, help="Fail with exit 2 if TEAM-STANDARDS.md is out of date.")
+@click.pass_obj
+def build(config: Config, check: bool) -> int:
     """Build TEAM-STANDARDS.md from core/domain standards.yml."""
-    click.echo("build: not implemented yet")
+    repo_root = Path.cwd()
+    core = repo_root / config.standards.core
+    domain = repo_root / config.standards.domain
+    output = repo_root / config.standards.output
+    try:
+        build_standards(core, domain, output, check=check)
+    except RegistryError as exc:
+        # A malformed/missing core.standards.yml is a usage error, same as `lint`'s
+        # behavior for the identical input (exit 64) -- not an unmapped exit 4.
+        # StandardsDriftError (raised directly by build_standards on drift) is a
+        # ValueError-derived AttestError sibling, not a RegistryError, and is
+        # deliberately left to propagate untouched to its own exit-2 path.
+        raise click.UsageError(str(exc)) from exc
+    click.echo(f"wrote {output}" if not check else f"{output} is up to date")
+    return 0
 
 
 @standards.command()
-def lint() -> None:
+@click.pass_obj
+def lint(config: Config) -> int:
     """Lint standards.yml against the ADR-001 schema."""
-    click.echo("lint: not implemented yet")
+    repo_root = Path.cwd()
+    core = repo_root / config.standards.core
+    domain = repo_root / config.standards.domain
+    errors = lint_standards(core, domain)
+    if errors:
+        raise click.UsageError("\n".join(error.message for error in errors))
+    click.echo("standards.yml is valid")
+    return 0
 
 
 @standards.command(name="new-rule")

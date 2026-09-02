@@ -12,8 +12,6 @@ from py_attest.cli.main import cli
         ["new"],
         ["upgrade"],
         ["calibrate"],
-        ["standards", "build"],
-        ["standards", "lint"],
         ["standards", "new-rule"],
     ],
 )

@@ -81,7 +81,7 @@ py_attest/
 │   ├── egress/raw.py        context pack (default)                                               ← A
 │   ├── egress/minimized.py  ★ alias de rutas, eliminación de valores, validación residual         ← B egress.py + redaction.py
 │   ├── reviewer.py          orquesta egress → provider → validación                              ← A review.py (main) + llm.py (parte)
-│   ├── postfilter.py        evidencia por fragmentos, degrade-not-drop (evidence_policy=degrade)  ← A postfilter.py
+│   ├── postfilter.py        solo dedup: merge_findings por (rule_id, path, side, line_start, line_end)  ← A postfilter.py
 │   ├── validation.py        ★ fail_closed: rangos en líneas cambiadas por lado, alias, severidad  ← B reviewer.py (validación)
 │   ├── policy.py            TRUST_POLICY (severidad × confianza) + contextual → COMMENT           ← A gating.py + ★ B policy.py
 │   ├── report.py            JSON (§4.3) + Markdown; sanitización de salida                       ← A review.py (render) + ★ B report.py
@@ -148,7 +148,7 @@ Click devuelve 2 en errores de uso: `main.py` los captura → 64.
 
 **`attest gate`** — `--branch <ref>` · `--base` · `--out` · `--no-llm`. Comodidad local y para repos privados sin forks: ejecuta `check` y luego `review` sobre `base...branch`, combina hallazgos y emite un solo reporte. Exit = máximo de ambos.
 
-**`attest doctor`**, **`attest standards build|lint|new-rule`**, **`attest new`**, **`attest upgrade`**, **`attest calibrate`**: sin cambios respecto a v0.1 §4.2, salvo `calibrate` que en v1 usa `--provider fake` para verificar el pipeline sin key.
+**`attest doctor`**, **`attest standards build|lint|new-rule`**, **`attest new`**, **`attest upgrade`**, **`attest calibrate`**: sin cambios respecto a v0.1 §4.2, salvo `calibrate` que en v1 usa `--provider fake` para verificar el pipeline sin key. `attest standards build --check` fails with exit 2 on drift; that exit code is not accompanied by a schema_version 3 JSON report (no `stage: "review"`, no `verdict` payload) -- it is a plain CLI failure.
 
 ### 4.3 Schema del reporte (JSON, `schema_version: 3`)
 
@@ -202,7 +202,7 @@ Nunca se incluyen: el patch original, la respuesta cruda del proveedor, el mapa 
 | 3 | Firewall gitleaks (diff) | A `secrets_gate.py` por stdin, `--redact` | leak → BLOCK sin proveedor; gitleaks ausente → 4 |
 | 4 | Egress | `raw` (default): context pack de A · `minimized` ★: B egress con validación residual | `minimized` residual falla → INCONCLUSIVE (4); nunca se envía ni se hace eco del valor |
 | 5 | Proveedor | ADR-002; `fake` para tests/calibrate | sin key → `skipped:no_provider_key`, veredicto por capas 2-3 (exit 0/2); transitorio → reintentos; permanente → 4 |
-| 6 | Validación | schema (A) + `rule_id ∈ registry` (ADR-001) + ★ rangos dentro de líneas cambiadas del lado declarado + severidad desde el catálogo o contextual ⇒ `requires_human_classification` | `degrade` (default, A): hallazgo con evidencia no verificable → `confidence=low` visible, `filtered_out` audita lo estructuralmente inválido · `fail_closed` ★: cualquier fallo invalida la respuesta entera → INCONCLUSIVE |
+| 6 | Validación | schema (A) + `rule_id ∈ registry` (ADR-001) + ★ rangos dentro de líneas cambiadas del lado declarado + severidad desde el catálogo o contextual ⇒ `requires_human_classification` | `degrade` (default, A): `rule_id` desconocido o rango fuera de las líneas cambiadas → `filtered_out` con `reason` (visible, binario); hallazgos válidos conservan la severidad resuelta del catálogo · `fail_closed` ★: cualquier fallo invalida la respuesta entera → INCONCLUSIVE |
 | 7 | Policy | `TRUST_POLICY[(severity, confidence)]`; contextual → COMMENT; `review_complete=false` → INCONCLUSIVE aunque no haya hallazgos | — |
 | 8 | Reporte | JSON + md sanitizados; comentario idempotente en PR (B) | IO → 4 |
 

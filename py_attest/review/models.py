@@ -2,14 +2,15 @@
 
 from typing import Any
 
-SEVERITIES = ("S1", "S2", "S3")
 CONFIDENCE_LEVELS = ("high", "medium", "low")
+SIDES = ("old", "new")
 
 FINDING_PROPERTIES: dict[str, Any] = {
-    "rule": {"type": "string"},
-    "severity": {"type": "string", "enum": list(SEVERITIES)},
-    "file": {"type": "string"},
-    "line": {"type": ["integer", "null"]},
+    "rule_id": {"type": "string"},
+    "path": {"type": "string"},
+    "side": {"type": "string", "enum": list(SIDES)},
+    "line_start": {"type": "integer"},
+    "line_end": {"type": "integer"},
     "title": {"type": "string"},
     "evidence": {"type": "string"},
     "explanation": {"type": "string"},
@@ -63,9 +64,9 @@ def validate_review_result(value: object) -> dict[str, Any]:
 
 def _validate_finding(finding: dict[str, Any], index: int) -> None:
     string_fields = {
-        "rule",
-        "severity",
-        "file",
+        "rule_id",
+        "path",
+        "side",
         "title",
         "evidence",
         "explanation",
@@ -74,10 +75,13 @@ def _validate_finding(finding: dict[str, Any], index: int) -> None:
     }
     if any(not isinstance(finding[field], str) for field in string_fields):
         raise SchemaValidationError(f"finding {index} contains a non-string text field")
-    if finding["severity"] not in SEVERITIES:
-        raise SchemaValidationError(f"finding {index} has an invalid severity")
+    if finding["side"] not in SIDES:
+        raise SchemaValidationError(f"finding {index} has an invalid side")
     if finding["confidence"] not in CONFIDENCE_LEVELS:
         raise SchemaValidationError(f"finding {index} has an invalid confidence")
-    line = finding["line"]
-    if line is not None and (not isinstance(line, int) or isinstance(line, bool)):
-        raise SchemaValidationError(f"finding {index} line must be an integer or null")
+    for bound in ("line_start", "line_end"):
+        value = finding[bound]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise SchemaValidationError(f"finding {index} {bound} must be a positive integer")
+    if finding["line_end"] < finding["line_start"]:
+        raise SchemaValidationError(f"finding {index} line_end must be >= line_start")

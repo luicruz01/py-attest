@@ -49,6 +49,34 @@ def test_changed_line_index_tracks_both_sides() -> None:
     assert index["old"]["app/main.py"] == {1, 2}
 
 
+CONTEXT_AND_DASH_PREFIXED_DIFF = (
+    "diff --git a/app/main.py b/app/main.py\n"
+    "--- a/app/main.py\n"
+    "+++ b/app/main.py\n"
+    "@@ -1,3 +1,3 @@\n"
+    " keep this line\n"
+    "--- legacy marker\n"
+    "+new value\n"
+    " old tail\n"
+)
+
+
+def test_changed_line_index_does_not_mistake_a_dash_prefixed_body_line_for_a_header() -> None:
+    # The hunk has a real, untouched context line at both ends (exercising the
+    # `elif not text.startswith("\\")` branch, which no other test in this file hit
+    # before) and a removed line whose own content starts with "-- ", which -- once
+    # diff-prefixed with the removal marker "-" -- becomes the line "--- legacy marker".
+    # That must be classified as hunk-body content (a removed old-side line), never
+    # mistaken for a "--- a/file" header just because it starts in the active hunk.
+    index = changed_line_index(CONTEXT_AND_DASH_PREFIXED_DIFF)
+
+    assert index["old"]["app/main.py"] == {2}
+    assert index["new"]["app/main.py"] == {2}
+    # old_file must stay "app/main.py" -- not get overwritten with "legacy marker".
+    assert "legacy marker" not in index["old"]
+    assert "legacy marker" not in index["new"]
+
+
 def test_valid_finding_gets_resolved_severity() -> None:
     result = validate_findings(
         [_finding()], registry=_registry(), diff=DIFF, evidence_policy="degrade"
@@ -85,6 +113,26 @@ def test_contextual_rule_gets_no_severity_and_requires_human_classification() ->
     assert resolved["severity"] is None
     assert resolved["requires_human_classification"] is True
     assert verdict(result.findings) == ("COMMENT", 0)
+
+
+def test_degrade_drops_deterministic_mode_rule_id_as_unknown() -> None:
+    # secrets-1 is a real, valid registry entry -- but mode: deterministic, so it was
+    # never shown to the model in the <review-rules> block (render_rules_block only
+    # lists registry.llm_rules()). A finding citing it is just as unverifiable as one
+    # citing a made-up id and must be rejected the same way.
+    registry = _registry()
+    assert "secrets-1" in registry
+    assert registry.rule("secrets-1").mode == "deterministic"
+
+    result = validate_findings(
+        [_finding(rule_id="secrets-1")],
+        registry=registry,
+        diff=DIFF,
+        evidence_policy="degrade",
+    )
+
+    assert result.findings == []
+    assert result.filtered_out[0]["reason"] == "unknown_rule_id"
 
 
 def test_degrade_drops_unknown_rule_id_into_filtered_out() -> None:

@@ -122,9 +122,9 @@ No pydantic. Existing stdlib dict + manual validation, matching every other modu
 
 Given schema-valid raw findings + the loaded `Registry` + a per-side changed-line index built from the diff (same shape as Seed B's `Patch.line_indexes`; a new small function in this module, since it has no other consumer today):
 
-- `rule_id` not in registry → invalid.
+- `rule_id` not in registry → invalid. **Narrowed by the citable set:** the registry membership check alone isn't enough — a `rule_id` must also satisfy `registry.rule(rule_id).mode == "llm"`, since `context_pack.render_rules_block` only injects `registry.llm_rules()` into the model's `<review-rules>` block; a deterministic-mode id (e.g. `secrets-1`) is a real registry member the model was never shown, so citing it is equally unverifiable and is rejected with the same `"unknown_rule_id"` reason.
 - `[line_start, line_end]` not entirely within the changed lines for `(path, side)` → invalid. This **replaces** `postfilter.py`'s evidence-text-fragment re-anchoring (`_evidence_line`/`_trusted_short_evidence_line`) for LLM findings — no fallback to the old mechanism; keeping both would need reconciliation logic for two competing ways to locate a finding, for no real gain now that the model declares its location explicitly.
-- A valid finding's severity is resolved via `registry.fixed_severity(rule_id)`; if `registry.is_contextual(rule_id)`, `severity = None` and `requires_human_classification = True`.
+- A valid finding's severity is resolved via `registry.fixed_severity(rule_id)`; if `registry.is_contextual(rule_id)`, `severity = None` and `requires_human_classification = True`. The resolved finding's `evidence_verified: True` certifies only that this rule_id + line-range location was validated — it does **not** mean the quoted `evidence` text was matched against the diff's content (that comparison doesn't happen anywhere in this module).
 
 `Config.evidence_policy`:
 - **`degrade`** (default): invalid findings → `filtered_out` (visible, `reason: "unknown_rule_id"` or `"range_not_in_changed_lines"`); valid findings pass through with resolved severity. `review_complete` stays `True`. This preserves today's "evidence with unresolvable location survives visibly" philosophy, just with a crisper verification mechanism.

@@ -1,0 +1,13 @@
+{
+  "branch": "feature/score-validation",
+  "source": {
+    "base_sha": "fbd4e09643ea61027165fdbfafbb2c3e5edd0153",
+    "head_sha": "60a6090693bc327d90838943f13890ca803f37a0",
+    "merge_base_sha": "fbd4e09643ea61027165fdbfafbb2c3e5edd0153",
+    "patch_sha256": "edef156d10b2bda7628f4cf54bea09fea4f317978b2d5b3a3122ff48c172a8cb"
+  },
+  "verdict": "BLOCK",
+  "findings": [
+    {"rule_id": "code-quality-3", "severity": "S2", "path": "app/main.py", "line_start": 52, "line_end": 52, "llm_reachable": true}
+  ]
+}

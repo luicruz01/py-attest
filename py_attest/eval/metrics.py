@@ -21,6 +21,8 @@ import yaml
 from py_attest.config import Config
 from py_attest.review.reviewer import run_review
 
+_DETERMINISTIC_SECRET_RULE_ID = "secrets-1"  # noqa: S105 - a rule id, not a credential
+
 
 class EvaluationError(ValueError):
     """Raised when evaluation inputs do not have the expected structure."""
@@ -272,7 +274,15 @@ class EgressResults:
 def evaluate(golden_dir: Path, egress: str, *, require_all: bool = False) -> EgressResults:
     """Replay each branch's provider_response.<egress>.json through the real pipeline
     (reviewer.run_review with provider="fake") and score it under all three readings.
-    A branch with no recording for this egress mode is skipped unless require_all."""
+    A branch with no recording for this egress mode is skipped unless require_all.
+
+    A branch whose expected.json carries a secrets-1 finding is always skipped, even
+    under require_all: the secrets firewall fires deterministically before any LLM
+    call for that branch (reviewer.py's run_review, and record.py's own mirrored
+    check), so no recording will ever exist for it -- require_all's "missing" means
+    "missing something that should exist," not "missing something the design says
+    never will."
+    """
     if egress not in {"raw", "minimized"}:
         raise EvaluationError(f"unknown egress mode: {egress!r}")
 
@@ -283,9 +293,12 @@ def evaluate(golden_dir: Path, egress: str, *, require_all: bool = False) -> Egr
         branch_dir = expected_path.parent
         branch = json.loads(expected_path.read_text(encoding="utf-8"))
         recording_path = branch_dir / f"provider_response.{egress}.json"
+        secrets_gated = any(
+            f.get("rule_id") == _DETERMINISTIC_SECRET_RULE_ID for f in branch["findings"]
+        )
 
         if not recording_path.is_file():
-            if require_all:
+            if require_all and not secrets_gated:
                 raise EvaluationError(
                     f"missing provider_response.{egress}.json for {branch['branch']}"
                 )

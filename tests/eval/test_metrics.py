@@ -287,6 +287,35 @@ def test_evaluate_raises_when_require_all_and_a_recording_is_missing(tmp_path) -
         evaluate(golden_dir, "raw", require_all=True)
 
 
+def test_evaluate_never_requires_a_recording_for_a_secrets_gated_branch(tmp_path) -> None:
+    """A branch whose expected.json carries a secrets-1 finding will never have a
+    recording -- the firewall fires deterministically before any LLM call, both in
+    reviewer.run_review and in record.py's own mirrored check. require_all must not
+    treat that permanent, by-design absence as a missing artifact."""
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/leaked-secret",
+        verdict="BLOCK",
+        findings=[
+            {
+                "rule_id": "secrets-1",
+                "severity": "S1",
+                "path": "app/main.py",
+                "line_start": 1,
+                "line_end": 1,
+                "llm_reachable": True,
+            }
+        ],
+        recording=None,
+    )
+
+    results = evaluate(golden_dir, "raw", require_all=True)
+
+    assert results.branches == []
+    assert results.skipped == ["feature/leaked-secret"]
+
+
 def test_render_markdown_includes_all_three_readings(tmp_path) -> None:
     golden_dir = tmp_path / "golden"
     _write_branch(

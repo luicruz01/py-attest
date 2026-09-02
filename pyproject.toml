@@ -38,14 +38,18 @@ attest = "py_attest.cli.main:cli"
 
 [project.optional-dependencies]
 scaffold = ["copier>=9"]
-# Pinned <2.0: Seed A's llm.py targets the openai 1.x chat-completions surface
-# (client.chat.completions.create, BadRequestError.param/.code); openai>=2.0 changed
-# that surface enough to break it. F0.3's provider Protocol (ADR-002) is expected to
-# move to the Responses API with store=False, at which point this pin should be
-# revisited/dropped -- tracked as an ADR-002 action item, not a permanent constraint.
+# Pinned <2.0: F0.3's provider (llm/providers/openai.py) targets the openai 1.x
+# chat-completions surface (client.chat.completions.create, BadRequestError.param/.code,
+# response_format json_schema strict, store=False); openai>=2.0 changed that surface
+# enough to break it. Revisit this pin if the provider ever moves to the Responses API.
 openai = ["openai>=1.0,<2.0"]
 anthropic = ["anthropic>=0.34"]
 all = ["copier>=9", "openai>=1.0,<2.0", "anthropic>=0.34"]
+
+[project.entry-points."py_attest.providers"]
+fake = "py_attest.llm.providers.fake:FakeProvider"
+openai = "py_attest.llm.providers.openai:OpenAIProvider"
+anthropic = "py_attest.llm.providers.anthropic:AnthropicProvider"
 
 [dependency-groups]
 dev = [

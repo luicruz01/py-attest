@@ -89,7 +89,7 @@ py_attest/
 ├── llm/                     ADR-002
 │   ├── types.py             ★ forma de B providers/base.py + temperature_applied (A), usage, attempts
 │   ├── policy.py registry.py
-│   ├── prompts/reviewer_v3.md (A) · code_review_v2.txt (★ B, para egress minimized)
+│   ├── prompts/reviewer_v3.md (A) — code_review_v2.txt (★ B) no se portó: reviewer_v3.md cubre ambos egress vía rules_block (F0.3)
 │   └── providers/openai.py (A llm.py: json_schema strict + fallback de temperatura; ★ store=False de B)
 │                 fake.py (★ B) · anthropic.py (nuevo)
 ├── doctor/                  runner.py checks/ report.py (§6)

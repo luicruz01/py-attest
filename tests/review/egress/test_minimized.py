@@ -177,6 +177,20 @@ def test_build_minimized_egress_returns_the_report_block_and_payload_version() -
     assert "f.py" not in result.user_content
 
 
+def test_build_minimized_egress_exposes_path_aliases_for_de_aliasing_the_response() -> None:
+    """A model shown a minimized payload can only cite the aliased path it was given
+    (e.g. file_0001.py) -- reviewer.py needs this mapping back to the real path so a
+    finding's declared location can be checked against the real diff. Without this,
+    every minimized-mode finding cites a path that never appears in the real diff and
+    is unconditionally rejected as range_not_in_changed_lines, regardless of whether
+    the finding is otherwise correct."""
+    diff = "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -0,0 +1 @@\n+x = 1\n"
+
+    result = build_minimized_egress(diff, title="Add x", description="adds x")
+
+    assert result.path_aliases == {"file_0001.py": "f.py"}
+
+
 def test_build_minimized_egress_propagates_egress_error_for_unsupported_text() -> None:
     from py_attest.review.egress.minimized import EgressError
 

@@ -1,4 +1,4 @@
-"""Tests for deterministic reviewer evaluation metrics."""
+"""Tests for the golden-set matcher and finding-level readings."""
 
 import json
 import shutil
@@ -8,286 +8,387 @@ from pathlib import Path
 import pytest
 
 from py_attest.eval.metrics import (
-    BranchResults,
     EvaluationError,
-    EvaluationResults,
-    _load_pr_numbers,
-    _load_review,
-    _verdict_class,
+    FindingResults,
+    apply_adjudications,
     evaluate,
     findings_match,
     main,
     match_findings,
     render_markdown,
+    severity_exact_results,
 )
 
 
-def test_matcher_uses_file_and_rule_section_prefix() -> None:
-    expected = {"file": "app/main.py", "rule": "3"}
+def _finding(rule_id: str, path: str, line_start: int, line_end: int, **extra) -> dict:
+    return {
+        "rule_id": rule_id,
+        "path": path,
+        "line_start": line_start,
+        "line_end": line_end,
+        **extra,
+    }
 
-    assert findings_match(expected, {"file": "app/main.py", "rule": "3-PII-logging"})
-    assert not findings_match(expected, {"file": "app/other.py", "rule": "3-PII"})
-    assert not findings_match(expected, {"file": "app/main.py", "rule": "13-PII"})
+
+def test_findings_match_requires_rule_id_and_path_and_overlapping_lines() -> None:
+    expected = _finding("code-quality-6", "app/streaks.py", 10, 10)
+
+    assert findings_match(expected, _finding("code-quality-6", "app/streaks.py", 10, 10))
+    assert findings_match(expected, _finding("code-quality-6", "app/streaks.py", 8, 12))  # overlap
+    assert not findings_match(expected, _finding("code-quality-6", "app/other.py", 10, 10))
+    assert not findings_match(expected, _finding("testing-3", "app/streaks.py", 10, 10))
+    assert not findings_match(expected, _finding("code-quality-6", "app/streaks.py", 20, 25))
 
 
-def test_matcher_is_one_to_one() -> None:
-    expected = [{"file": "app/main.py", "rule": "2", "note": "golden"}]
+def test_findings_match_tolerates_a_missing_predicted_line_range() -> None:
+    expected = _finding("pii-1", "app/main.py", 37, 37)
+    predicted = {"rule_id": "pii-1", "path": "app/main.py", "line_start": None, "line_end": None}
+
+    assert not findings_match(expected, predicted)
+
+
+def test_match_findings_is_one_to_one() -> None:
+    expected = [_finding("testing-3", "app/streaks.py", 10, 13)]
     predicted = [
-        {"file": "app/main.py", "rule": "2-tests", "title": "first"},
-        {"file": "app/main.py", "rule": "2-tests", "title": "duplicate"},
+        _finding("testing-3", "app/streaks.py", 10, 13, title="first"),
+        _finding("testing-3", "app/streaks.py", 10, 13, title="duplicate"),
     ]
 
-    results = match_findings("feature/example", expected, predicted)
+    results = match_findings("feature/streaks", expected, predicted)
 
     assert len(results.true_positives) == 1
     assert [record.finding["title"] for record in results.false_positives] == ["duplicate"]
     assert results.false_negatives == []
 
 
-def test_unreachable_findings_are_excluded_from_recall_denominator() -> None:
+def test_match_findings_reports_a_miss_as_a_false_negative() -> None:
+    expected = [_finding("retention-2", "app/archive.py", 4, 8)]
+
+    results = match_findings("feature/analytics-archive", expected, [])
+
+    assert results.true_positives == []
+    assert len(results.false_negatives) == 1
+    assert results.false_negatives[0].finding["rule_id"] == "retention-2"
+
+
+def test_unreachable_findings_are_excluded_from_the_recall_denominator() -> None:
     expected = [
-        {"file": "app/main.py", "rule": "2", "note": "reachable"},
-        {
-            "file": "app/notifications.py",
-            "rule": "3",
-            "note": "hidden behind firewall",
-            "llm_reachable": False,
-        },
+        _finding("code-quality-5", "app/notifications.py", 6, 6, llm_reachable=True),
+        _finding("pii-1", "app/notifications.py", 13, 13, llm_reachable=False),
     ]
+    predicted = [_finding("code-quality-5", "app/notifications.py", 6, 6)]
 
-    predicted = [{"file": "app/main.py", "rule": "2-tests", "title": "found"}]
-
-    results = match_findings("feature/example", expected, predicted)
+    results = match_findings("feature/email-reminders", expected, predicted)
 
     assert len(results.true_positives) == 1
-    assert results.false_negatives == []
-    assert len(results.unreachable) == 1
+    assert results.false_negatives == []  # the unreachable pii-1 never counts as a miss
     assert results.recall == 1.0
 
 
-def test_missing_artifact_is_reported_without_network_or_crash(tmp_path: Path) -> None:
-    ground_truth = tmp_path / "ground_truth.yml"
-    ground_truth.write_text(
-        "---\nbranches:\n  feature/missing:\n    verdict: BLOCK\n    findings:\n"
-        "    - {rule: '2', file: app/main.py}\n",
-        encoding="utf-8",
-    )
-    prs = tmp_path / "prs.json"
-    prs.write_text(
-        json.dumps([{"headRefName": "feature/missing", "number": 42, "state": "OPEN"}]),
-        encoding="utf-8",
+def test_finding_results_precision_recall_f1() -> None:
+    results = FindingResults(
+        true_positives=[object(), object()],  # 2 TP
+        false_positives=[object()],  # 1 FP
+        false_negatives=[object()],  # 1 FN
     )
 
-    results = evaluate(ground_truth, prs, tmp_path)
-
-    assert len(results.branches) == 1
-    assert results.branches[0].predicted_verdict is None
-    assert results.branches[0].artifact is None
-    assert len(results.findings.false_negatives) == 1
-    assert results.block_recall == 0.0
-    assert "| feature/missing | BLOCK | MISSING | MISSING |" in render_markdown(results)
+    assert results.precision == 2 / 3
+    assert results.recall == 2 / 3
+    assert round(results.f1, 4) == round(2 * (2 / 3) * (2 / 3) / ((2 / 3) + (2 / 3)), 4)
 
 
-def test_branch_keyed_runs_dir_needs_no_pr_mapping_and_uses_label(tmp_path: Path) -> None:
-    ground_truth = tmp_path / "ground_truth.yml"
-    ground_truth.write_text(
-        "---\nbranches:\n  feature/example:\n    verdict: BLOCK\n    findings:\n"
-        "    - {rule: '2', file: app/main.py}\n",
+def test_finding_results_ratios_are_zero_not_a_crash_on_empty_input() -> None:
+    results = FindingResults(true_positives=[], false_positives=[], false_negatives=[])
+
+    assert results.precision == 0.0
+    assert results.recall == 0.0
+    assert results.f1 == 0.0
+
+
+def test_severity_exact_demotes_a_mismatched_severity_to_fn_plus_fp() -> None:
+    expected = _finding("code-quality-3", "app/main.py", 52, 52, severity="S2")
+    predicted = _finding("code-quality-3", "app/main.py", 52, 52, severity="S3")
+    strict = match_findings("feature/score-validation", [expected], [predicted])
+    assert len(strict.true_positives) == 1  # strict ignores severity entirely
+
+    exact = severity_exact_results(strict)
+
+    assert exact.true_positives == []
+    assert len(exact.false_negatives) == 1  # expected S2 never matched
+    assert len(exact.false_positives) == 1  # predicted S3 never matched
+
+
+def test_severity_exact_keeps_a_matching_severity_as_tp() -> None:
+    expected = _finding("pii-1", "app/main.py", 37, 37, severity="S1")
+    predicted = _finding("pii-1", "app/main.py", 37, 37, severity="S1")
+    strict = match_findings("feature/support-context", [expected], [predicted])
+
+    exact = severity_exact_results(strict)
+
+    assert len(exact.true_positives) == 1
+    assert exact.false_positives == []
+    assert exact.false_negatives == []
+
+
+def test_severity_exact_carries_over_unmatched_findings_unchanged() -> None:
+    expected = [_finding("retention-2", "app/archive.py", 4, 8, severity="S1")]
+    strict = match_findings("feature/analytics-archive", expected, [])  # no prediction -> 1 FN
+
+    exact = severity_exact_results(strict)
+
+    assert len(exact.false_negatives) == 1
+    assert exact.true_positives == []
+    assert exact.false_positives == []
+
+
+def test_adjudications_credit_a_documented_mismatch_without_changing_strict() -> None:
+    expected = [_finding("code-quality-6", "app/streaks.py", 10, 10)]
+    predicted = [
+        _finding("code-quality-6", "app/main.py", 5, 5, title="filed under the wrong path")
+    ]
+    strict = match_findings("feature/streaks", expected, predicted)
+    assert strict.true_positives == []
+    assert len(strict.false_negatives) == 1
+    assert len(strict.false_positives) == 1
+
+    adjudications = [
+        {
+            "branch": "feature/streaks",
+            "expected": {"rule_id": "code-quality-6", "path": "app/streaks.py"},
+            "predicted": {"rule_id": "code-quality-6", "path": "app/main.py"},
+            "reason": "same root cause, filed under a neighboring path",
+        }
+    ]
+
+    adjudicated = apply_adjudications("feature/streaks", strict, predicted, adjudications)
+
+    assert len(adjudicated.true_positives) == 1
+    assert adjudicated.false_negatives == []
+    assert adjudicated.false_positives == []
+    # strict itself is untouched
+    assert len(strict.false_negatives) == 1
+    assert len(strict.false_positives) == 1
+
+
+def test_adjudications_only_apply_to_their_own_branch() -> None:
+    expected = [_finding("code-quality-6", "app/streaks.py", 10, 10)]
+    predicted = [_finding("code-quality-6", "app/main.py", 5, 5)]
+    strict = match_findings("feature/other-branch", expected, predicted)
+
+    adjudications = [
+        {
+            "branch": "feature/streaks",  # different branch
+            "expected": {"rule_id": "code-quality-6", "path": "app/streaks.py"},
+            "predicted": {"rule_id": "code-quality-6", "path": "app/main.py"},
+            "reason": "n/a",
+        }
+    ]
+
+    adjudicated = apply_adjudications("feature/other-branch", strict, predicted, adjudications)
+
+    assert adjudicated.true_positives == []
+    assert len(adjudicated.false_negatives) == 1
+    assert len(adjudicated.false_positives) == 1
+
+
+def _init_git_repo(root: Path) -> None:
+    """run_review's _gate_commit unconditionally runs `git rev-parse HEAD` in repo_root
+    (even for a provider="fake" replay) -- give evaluate()'s fixtures a real, hermetic
+    git ancestor rather than mocking that away, so these tests actually exercise the
+    real pipeline end to end."""
+    git_executable = shutil.which("git")
+    assert git_executable is not None
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(  # noqa: S603 - resolved executable, fixed arguments, no shell
+            [git_executable, *args], cwd=root, check=True
+        )
+    (root / ".gitkeep").write_text("", encoding="utf-8")
+    for args in (["add", "."], ["commit", "-q", "-m", "init"]):
+        subprocess.run(  # noqa: S603 - resolved executable, fixed arguments, no shell
+            [git_executable, *args], cwd=root, check=True
+        )
+
+
+def _write_branch(
+    tmp_path, branch: str, *, verdict: str, findings: list[dict], recording: dict | None
+) -> None:
+    if not (tmp_path / ".git").is_dir():
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        _init_git_repo(tmp_path)
+    branch_dir = tmp_path / branch
+    branch_dir.mkdir(parents=True)
+    (branch_dir / "diff.patch").write_text(
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,1 +1,2 @@\n x\n+y\n",
         encoding="utf-8",
     )
-    runs_dir = tmp_path / "runs_v2"
-    artifact = runs_dir / "feature/example.json"
-    artifact.parent.mkdir(parents=True)
-    artifact.write_text(
+    (branch_dir / "expected.json").write_text(
         json.dumps(
             {
-                "verdict": "BLOCK",
-                "findings": [{"rule": "2-testing", "file": "app/main.py"}],
+                "branch": branch,
+                "source": {
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "merge_base_sha": "a" * 40,
+                    "patch_sha256": "c" * 64,
+                },
+                "verdict": verdict,
+                "findings": findings,
             }
         ),
         encoding="utf-8",
     )
-
-    results = evaluate(
-        ground_truth,
-        tmp_path / "prs-does-not-exist.json",
-        tmp_path / "runs-does-not-exist",
-        runs_dir=runs_dir,
-    )
-
-    assert results.branches[0].artifact == artifact
-    assert results.block_recall == 1.0
-    assert len(results.findings.true_positives) == 1
-    assert render_markdown(results, "v2").startswith("# Reviewer Evaluation Metrics v2\n")
-
-
-def test_unreachable_detected_is_reported_outside_llm_metrics() -> None:
-    expected = [
-        {
-            "file": "app/notifications.py",
-            "rule": "3",
-            "llm_reachable": False,
-        }
-    ]
-    predicted = [{"file": "app/notifications.py", "rule": "3-secrets", "title": "found anyway"}]
-
-    results = match_findings("feature/example", expected, predicted)
-
-    assert len(results.unreachable_detected) == 1
-    evaluation = EvaluationResults(
-        branches=[
-            BranchResults(
-                branch="feature/example",
-                expected_verdict="BLOCK",
-                predicted_verdict="BLOCK",
-                artifact=None,
-                finding_results=results,
-            )
-        ],
-        findings=results,
-    )
-
-    markdown = render_markdown(evaluation)
-
-    assert "detected outside LLM metrics" in markdown
-
-
-def test_load_review_finds_a_single_artifact_by_pr_number(tmp_path: Path) -> None:
-    artifacts_root = tmp_path / "pr-7" / "artifacts" / "run"
-    artifacts_root.mkdir(parents=True)
-    (artifacts_root / "report.json").write_text(
-        json.dumps({"verdict": "BLOCK", "findings": [{"rule": "2", "file": "app/main.py"}]}),
-        encoding="utf-8",
-    )
-
-    artifact, review = _load_review("feature/x", {"feature/x": 7}, tmp_path)
-
-    assert artifact == artifacts_root / "report.json"
-    assert review == {"verdict": "BLOCK", "findings": [{"rule": "2", "file": "app/main.py"}]}
-
-
-def test_load_review_returns_none_when_branch_has_no_pr(tmp_path: Path) -> None:
-    assert _load_review("feature/unknown", {}, tmp_path) == (None, None)
-
-
-def test_load_review_rejects_multiple_artifacts_for_one_branch(tmp_path: Path) -> None:
-    artifacts_root = tmp_path / "pr-7" / "artifacts"
-    for name in ("a", "b"):
-        run_dir = artifacts_root / name
-        run_dir.mkdir(parents=True)
-        (run_dir / "report.json").write_text(
-            json.dumps({"verdict": "BLOCK", "findings": []}), encoding="utf-8"
+    if recording is not None:
+        (branch_dir / "provider_response.raw.json").write_text(
+            json.dumps(recording), encoding="utf-8"
         )
 
-    with pytest.raises(EvaluationError, match="multiple reviewer artifacts"):
-        _load_review("feature/x", {"feature/x": 7}, tmp_path)
+
+def test_evaluate_skips_branches_with_no_recording_when_require_all_is_false(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
+
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    assert results.branches == []
+    assert results.skipped == ["feature/clean"]
 
 
-def test_load_review_rejects_an_invalid_artifact(tmp_path: Path) -> None:
-    artifacts_root = tmp_path / "pr-7" / "artifacts" / "run"
-    artifacts_root.mkdir(parents=True)
-    (artifacts_root / "report.json").write_text(
-        json.dumps({"verdict": "BLOCK", "findings": ["not-a-dict"]}), encoding="utf-8"
+def test_evaluate_replays_a_recording_through_the_full_pipeline(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
     )
 
-    with pytest.raises(EvaluationError, match="invalid reviewer finding"):
-        _load_review("feature/x", {"feature/x": 7}, tmp_path)
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    assert results.skipped == []
+    assert len(results.branches) == 1
+    branch = results.branches[0]
+    assert branch.branch == "feature/clean"
+    assert branch.expected_verdict == "APPROVE"
+    assert branch.predicted_verdict == "APPROVE"
+    assert branch.readings["strict"].true_positives == []
 
 
-def test_load_pr_numbers_prefers_the_open_pr_for_a_reused_branch_name(tmp_path: Path) -> None:
-    prs = tmp_path / "prs.json"
-    prs.write_text(
-        json.dumps(
-            [
-                {"headRefName": "feature/x", "number": 1, "state": "CLOSED"},
-                {"headRefName": "feature/x", "number": 2, "state": "OPEN"},
-            ]
-        ),
-        encoding="utf-8",
+def test_evaluate_raises_when_require_all_and_a_recording_is_missing(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
+
+    with pytest.raises(EvaluationError, match="feature/clean"):
+        evaluate(golden_dir, "raw", require_all=True)
+
+
+def test_evaluate_never_requires_a_recording_for_a_secrets_gated_branch(tmp_path) -> None:
+    """A branch whose expected.json carries a secrets-1 finding will never have a
+    recording -- the firewall fires deterministically before any LLM call, both in
+    reviewer.run_review and in record.py's own mirrored check. require_all must not
+    treat that permanent, by-design absence as a missing artifact."""
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/leaked-secret",
+        verdict="BLOCK",
+        findings=[
+            {
+                "rule_id": "secrets-1",
+                "severity": "S1",
+                "path": "app/main.py",
+                "line_start": 1,
+                "line_end": 1,
+                "llm_reachable": True,
+            }
+        ],
+        recording=None,
     )
 
-    assert _load_pr_numbers(prs) == {"feature/x": 2}
+    results = evaluate(golden_dir, "raw", require_all=True)
+
+    assert results.branches == []
+    assert results.skipped == ["feature/leaked-secret"]
 
 
-def test_load_pr_numbers_rejects_a_non_list_payload(tmp_path: Path) -> None:
-    prs = tmp_path / "prs.json"
-    prs.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
-
-    with pytest.raises(EvaluationError, match="must contain a list"):
-        _load_pr_numbers(prs)
-
-
-def test_verdict_class_rejects_an_unknown_verdict() -> None:
-    with pytest.raises(EvaluationError, match="unknown reviewer verdict"):
-        _verdict_class("MAYBE")
-
-
-def test_main_writes_the_report_and_returns_zero(tmp_path: Path) -> None:
-    ground_truth = tmp_path / "ground_truth.yml"
-    ground_truth.write_text(
-        "---\nbranches:\n  feature/example:\n    verdict: APPROVE\n    findings: []\n",
-        encoding="utf-8",
+def test_render_markdown_includes_all_three_readings(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
     )
-    output = tmp_path / "out" / "metrics.md"
-    prs = tmp_path / "prs.json"
-    prs.write_text("[]", encoding="utf-8")
+    results = evaluate(golden_dir, "raw", require_all=False)
+
+    report = render_markdown(results)
+
+    assert "strict" in report
+    assert "adjudicated" in report
+    assert "severity_exact" in report
+    assert "raw" in report
+
+
+def test_evaluate_rejects_an_unknown_egress_mode(tmp_path) -> None:
+    with pytest.raises(EvaluationError, match="unknown egress mode"):
+        evaluate(tmp_path / "golden", "bogus")
+
+
+def test_main_prints_the_report_and_returns_zero(tmp_path, capsys) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+
+    exit_code = main(["--golden-dir", str(golden_dir), "--egress", "raw"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "strict" in out
+    assert "raw" in out
+
+
+def test_main_writes_the_report_to_output_when_given(tmp_path) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(
+        golden_dir,
+        "feature/clean",
+        verdict="APPROVE",
+        findings=[],
+        recording={"findings": [], "summary": "nothing to report"},
+    )
+    output_path = tmp_path / "reports" / "eval.md"
 
     exit_code = main(
         [
-            "--ground-truth",
-            str(ground_truth),
-            "--prs",
-            str(prs),
-            "--runs-root",
-            str(tmp_path / "missing-runs"),
+            "--golden-dir",
+            str(golden_dir),
+            "--egress",
+            "raw",
             "--output",
-            str(output),
+            str(output_path),
         ]
     )
 
     assert exit_code == 0
-    assert output.is_file()
-    assert "Reviewer Evaluation Metrics v1" in output.read_text(encoding="utf-8")
+    assert "strict" in output_path.read_text(encoding="utf-8")
 
 
-def test_main_reports_evaluation_errors_as_exit_2(tmp_path: Path) -> None:
-    ground_truth = tmp_path / "ground_truth.yml"
-    ground_truth.write_text("not: valid\n", encoding="utf-8")
+def test_main_returns_two_and_prints_to_stderr_on_evaluation_error(tmp_path, capsys) -> None:
+    golden_dir = tmp_path / "golden"
+    _write_branch(golden_dir, "feature/clean", verdict="APPROVE", findings=[], recording=None)
 
-    exit_code = main(["--ground-truth", str(ground_truth)])
+    exit_code = main(["--golden-dir", str(golden_dir), "--egress", "raw", "--require-all"])
 
     assert exit_code == 2
-
-
-@pytest.mark.xfail(
-    reason=(
-        "tests Seed A's `make eval-run` target and its live seed branches; "
-        "golden-set fixtures and eval-run orchestration are F0.5 scope (TRD §11)"
-    ),
-    strict=True,
-)
-def test_make_eval_run_routes_all_seed_branches_through_selected_prompt() -> None:
-    make_executable = shutil.which("make")
-    assert make_executable is not None
-
-    result = subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
-        [make_executable, "--dry-run", "eval-run", "VERSION=v1"],
-        cwd=Path.cwd(),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    for branch in (
-        "feature/lessons-pagination",
-        "feature/score-validation",
-        "fix/mobile-sync-visibility",
-        "feature/support-context",
-        "feature/email-reminders",
-        "feature/streaks",
-        "feature/analytics-archive",
-        "fix/progress-percentage",
-    ):
-        assert branch in result.stdout
-    assert 'runs_dir="eval/runs_v1"' in result.stdout
-    assert '--prompt-version "v1"' in result.stdout
+    assert "evaluation failed" in capsys.readouterr().err

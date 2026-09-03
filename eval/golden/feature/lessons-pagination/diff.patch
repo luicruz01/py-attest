@@ -1,0 +1,42 @@
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..265a7ea5be9fcdcf80830804cc744978c1ddddaf 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -18,8 +18,10 @@ def health():
+ 
+ 
+ @app.get("/lessons")
+-def list_lessons():
+-    return [lesson.__dict__ for lesson in store.LESSONS]
++def list_lessons(limit: int = 50, offset: int = 0):
++    if limit < 1 or limit > 100 or offset < 0:
++        raise HTTPException(status_code=422, detail="invalid pagination params")
++    return [lesson.__dict__ for lesson in store.LESSONS[offset : offset + limit]]
+ 
+ 
+ def _get_student(student_id: str):
+diff --git a/tests/test_lessons_pagination.py b/tests/test_lessons_pagination.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..16bb17218a7aa979e3768fdd9fbfea99fde1b1b6
+--- /dev/null
++++ b/tests/test_lessons_pagination.py
+@@ -0,0 +1,19 @@
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++client = TestClient(app)
++
++
++def test_pagination_slice():
++    lessons = client.get("/lessons", params={"limit": 2, "offset": 1}).json()
++    assert [lesson["id"] for lesson in lessons] == ["l-02", "l-03"]
++
++
++def test_pagination_defaults_return_all():
++    assert len(client.get("/lessons").json()) == 5
++
++
++def test_pagination_invalid_params():
++    assert client.get("/lessons", params={"limit": 0}).status_code == 422
++    assert client.get("/lessons", params={"offset": -1}).status_code == 422

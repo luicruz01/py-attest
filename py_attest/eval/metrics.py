@@ -1,19 +1,27 @@
-"""Measure reviewer verdicts and findings against the labeled golden set."""
+"""Measure reviewer verdicts and findings against the golden set (F0.5).
+
+Matching follows Seed B's SCORING-POLICY.md "One-to-one finding matching": same
+rule_id, same path, overlapping [line_start, line_end] range. No finding text
+(title/evidence/explanation) affects matching -- only rule_id/path/line identify a
+finding, matching the schema_version 3 report shape (TRD SS4.3).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-VERDICTS = {"APPROVE", "BLOCK"}
-RULE_SECTION_RE = re.compile(r"^\s*(\d+)")
+from py_attest.config import Config
+from py_attest.review.reviewer import run_review
+
+_DETERMINISTIC_SECRET_RULE_ID = "secrets-1"  # noqa: S105 - a rule id, not a credential
 
 
 class EvaluationError(ValueError):
@@ -38,94 +46,45 @@ class FindingMatch:
 
 @dataclass
 class FindingResults:
-    """Finding-level evaluation results."""
+    """Finding-level results for one reading (strict / adjudicated / severity_exact)."""
 
-    true_positives: list[FindingMatch]
-    false_positives: list[FindingRecord]
-    false_negatives: list[FindingRecord]
-    unreachable: list[FindingRecord]
-    unreachable_detected: list[FindingMatch]
+    true_positives: list[Any] = field(default_factory=list)
+    false_positives: list[Any] = field(default_factory=list)
+    false_negatives: list[Any] = field(default_factory=list)
 
     @property
     def precision(self) -> float:
-        """Return finding precision over reachable labels."""
         denominator = len(self.true_positives) + len(self.false_positives)
         return _ratio(len(self.true_positives), denominator)
 
     @property
     def recall(self) -> float:
-        """Return finding recall with unreachable labels excluded."""
         denominator = len(self.true_positives) + len(self.false_negatives)
         return _ratio(len(self.true_positives), denominator)
 
     @property
     def f1(self) -> float:
-        """Return the harmonic mean of finding precision and recall."""
         return _ratio(2 * self.precision * self.recall, self.precision + self.recall)
 
 
-@dataclass(frozen=True)
-class BranchResults:
-    """Evaluation details for one branch."""
-
-    branch: str
-    expected_verdict: str
-    predicted_verdict: str | None
-    artifact: Path | None
-    finding_results: FindingResults
-
-
-@dataclass(frozen=True)
-class EvaluationResults:
-    """Complete verdict- and finding-level evaluation results."""
-
-    branches: list[BranchResults]
-    findings: FindingResults
-
-    @property
-    def block_precision(self) -> float:
-        """Return precision when BLOCK is the positive verdict."""
-        true_blocks = sum(
-            row.expected_verdict == "BLOCK" and row.predicted_verdict == "BLOCK"
-            for row in self.branches
-        )
-        predicted_blocks = sum(row.predicted_verdict == "BLOCK" for row in self.branches)
-        return _ratio(true_blocks, predicted_blocks)
-
-    @property
-    def block_recall(self) -> float:
-        """Return recall when BLOCK is the positive verdict."""
-        true_blocks = sum(
-            row.expected_verdict == "BLOCK" and row.predicted_verdict == "BLOCK"
-            for row in self.branches
-        )
-        expected_blocks = sum(row.expected_verdict == "BLOCK" for row in self.branches)
-        return _ratio(true_blocks, expected_blocks)
-
-    @property
-    def accuracy(self) -> float:
-        """Return verdict accuracy; a missing artifact is an incorrect result."""
-        correct = sum(
-            row.predicted_verdict is not None and row.expected_verdict == row.predicted_verdict
-            for row in self.branches
-        )
-        return _ratio(correct, len(self.branches))
-
-
-def rule_section(rule: object) -> str | None:
-    """Extract the leading TEAM-STANDARDS section number from a rule value."""
-    match = RULE_SECTION_RE.match(str(rule))
-    return match.group(1) if match else None
+def _ranges_overlap(a_start: int, a_end: int, b_start: int | None, b_end: int | None) -> bool:
+    if b_start is None or b_end is None:
+        return False
+    return a_start <= b_end and b_start <= a_end
 
 
 def findings_match(expected: dict[str, Any], predicted: dict[str, Any]) -> bool:
-    """Match findings by file and leading rule section number."""
-    expected_section = rule_section(expected.get("rule", ""))
-    predicted_section = rule_section(predicted.get("rule", ""))
+    """Match findings by exact rule_id, exact path, and overlapping line range."""
     return (
-        bool(expected_section)
-        and expected_section == predicted_section
-        and expected.get("file") == predicted.get("file")
+        expected.get("rule_id") is not None
+        and expected.get("rule_id") == predicted.get("rule_id")
+        and expected.get("path") == predicted.get("path")
+        and _ranges_overlap(
+            expected["line_start"],
+            expected["line_end"],
+            predicted.get("line_start"),
+            predicted.get("line_end"),
+        )
     )
 
 
@@ -134,9 +93,10 @@ def match_findings(
     expected: list[dict[str, Any]],
     predicted: list[dict[str, Any]],
 ) -> FindingResults:
-    """Perform deterministic one-to-one finding matching for one branch."""
+    """Perform deterministic one-to-one finding matching for one branch (the `strict`
+    reading). llm_reachable: false findings are excluded entirely -- they sit behind the
+    secrets firewall and no LLM-graded reviewer can be scored on them (TRD SS9)."""
     reachable = [finding for finding in expected if finding.get("llm_reachable", True)]
-    unreachable = [finding for finding in expected if not finding.get("llm_reachable", True)]
     remaining_predictions = list(predicted)
     true_positives: list[FindingMatch] = []
     false_negatives: list[FindingRecord] = []
@@ -152,273 +112,11 @@ def match_findings(
             FindingMatch(expected_record, FindingRecord(branch, predicted_finding))
         )
 
-    unreachable_records = [FindingRecord(branch, finding) for finding in unreachable]
-    unreachable_detected: list[FindingMatch] = []
-    for expected_record in unreachable_records:
-        match_index = _first_match(expected_record.finding, remaining_predictions)
-        if match_index is None:
-            continue
-        predicted_finding = remaining_predictions.pop(match_index)
-        unreachable_detected.append(
-            FindingMatch(expected_record, FindingRecord(branch, predicted_finding))
-        )
-
     return FindingResults(
         true_positives=true_positives,
         false_positives=[FindingRecord(branch, finding) for finding in remaining_predictions],
         false_negatives=false_negatives,
-        unreachable=unreachable_records,
-        unreachable_detected=unreachable_detected,
     )
-
-
-def evaluate(
-    ground_truth_path: Path,
-    prs_path: Path,
-    runs_root: Path,
-    *,
-    runs_dir: Path | None = None,
-) -> EvaluationResults:
-    """Load evaluation inputs and compute verdict and finding metrics."""
-    ground_truth = _load_ground_truth(ground_truth_path)
-    pr_numbers = _load_pr_numbers(prs_path) if runs_dir is None else {}
-    branch_results: list[BranchResults] = []
-
-    for branch, expected_review in ground_truth.items():
-        if runs_dir is None:
-            artifact, predicted_review = _load_review(branch, pr_numbers, runs_root)
-        else:
-            artifact, predicted_review = _load_branch_review(branch, runs_dir)
-        predicted_findings = predicted_review["findings"] if predicted_review else []
-        finding_results = match_findings(
-            branch,
-            expected_review["findings"],
-            predicted_findings,
-        )
-        branch_results.append(
-            BranchResults(
-                branch=branch,
-                expected_verdict=expected_review["verdict"],
-                predicted_verdict=(
-                    _verdict_class(predicted_review["verdict"]) if predicted_review else None
-                ),
-                artifact=artifact,
-                finding_results=finding_results,
-            )
-        )
-
-    return EvaluationResults(branch_results, _combine_findings(branch_results))
-
-
-def render_markdown(results: EvaluationResults, label: str = "v1") -> str:
-    """Render a complete, deterministic Markdown evaluation report."""
-    confusion = _confusion(results.branches)
-    findings = results.findings
-    lines = [
-        f"# Reviewer Evaluation Metrics {label}",
-        "",
-        "## Verdict-level metrics",
-        "",
-        "| Actual \\ Predicted | APPROVE | BLOCK | MISSING |",
-        "| --- | ---: | ---: | ---: |",
-        (
-            f"| APPROVE | {confusion[('APPROVE', 'APPROVE')]} | "
-            f"{confusion[('APPROVE', 'BLOCK')]} | {confusion[('APPROVE', 'MISSING')]} |"
-        ),
-        (
-            f"| BLOCK | {confusion[('BLOCK', 'APPROVE')]} | "
-            f"{confusion[('BLOCK', 'BLOCK')]} | {confusion[('BLOCK', 'MISSING')]} |"
-        ),
-        "",
-        f"- Block precision: {_percent(results.block_precision)}",
-        f"- Block recall: {_percent(results.block_recall)}",
-        f"- Accuracy: {_percent(results.accuracy)}",
-        "",
-        "## Per-branch results",
-        "",
-        "| Branch | Expected | Predicted | Verdict result | Finding TP | FP | FN | Artifact |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
-    ]
-    for row in results.branches:
-        lines.append(_branch_row(row))
-
-    lines.extend(
-        [
-            "",
-            "## Finding-level metrics",
-            "",
-            f"- Precision: {_percent(findings.precision)}",
-            f"- Recall: {_percent(findings.recall)}",
-            f"- F1: {_percent(findings.f1)}",
-            f"- TP: {len(findings.true_positives)}",
-            f"- FP: {len(findings.false_positives)}",
-            f"- FN: {len(findings.false_negatives)}",
-            "",
-            "### True positives (TP)",
-            "",
-        ]
-    )
-    _append_matches(lines, findings.true_positives)
-    lines.extend(["", "### False positives (FP)", ""])
-    _append_records(lines, findings.false_positives)
-    lines.extend(["", "### False negatives (FN)", ""])
-    _append_records(lines, findings.false_negatives)
-    lines.extend(["", "### By-design unreachable (secrets firewall)", ""])
-    if findings.unreachable:
-        detected_keys = {
-            (match.expected.branch, id(match.expected.finding))
-            for match in findings.unreachable_detected
-        }
-        for record in findings.unreachable:
-            status = (
-                "detected outside LLM metrics"
-                if (record.branch, id(record.finding)) in detected_keys
-                else "excluded from LLM recall denominator"
-            )
-            lines.append(f"- `{record.branch}` — {status}: `{_finding_json(record.finding)}`")
-    else:
-        lines.append("- None")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Compute metrics, write the versioned report, and echo it to stdout."""
-    parser = _parser()
-    args = parser.parse_args(argv)
-    try:
-        results = evaluate(
-            args.ground_truth,
-            args.prs,
-            args.runs_root,
-            runs_dir=args.runs_dir,
-        )
-        report = render_markdown(results, args.label)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(report, encoding="utf-8")
-    except (EvaluationError, OSError, yaml.YAMLError, json.JSONDecodeError) as exc:
-        sys.stderr.write(f"evaluation failed: {exc}\n")
-        return 2
-    sys.stdout.write(report)
-    return 0
-
-
-def _parser() -> argparse.ArgumentParser:
-    cwd = Path.cwd()
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--ground-truth",
-        type=Path,
-        default=cwd / "eval" / "ground_truth.yml",
-    )
-    parser.add_argument("--prs", type=Path, default=cwd / "eval" / "runs" / "prs.json")
-    parser.add_argument("--runs-root", type=Path, default=cwd / "eval" / "runs")
-    parser.add_argument(
-        "--runs-dir",
-        type=Path,
-        help="directory of branch-name keyed local reviewer JSON files",
-    )
-    parser.add_argument("--label", default="v1", help="report label (default: v1)")
-    parser.add_argument("--output", type=Path, default=cwd / "eval" / "metrics_v1.md")
-    return parser
-
-
-def _load_ground_truth(path: Path) -> dict[str, dict[str, Any]]:
-    documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
-    if len(documents) not in {1, 2} or (len(documents) == 2 and documents[1] is not None):
-        raise EvaluationError("ground truth must contain one non-empty YAML document")
-    payload = documents[0]
-    if not isinstance(payload, dict) or not isinstance(payload.get("branches"), dict):
-        raise EvaluationError("ground truth must contain a 'branches' mapping")
-    branches: dict[str, dict[str, Any]] = {}
-    for branch, review in payload["branches"].items():
-        if not isinstance(branch, str) or not isinstance(review, dict):
-            raise EvaluationError("each ground-truth branch must map to an object")
-        verdict = review.get("verdict")
-        findings = review.get("findings")
-        if verdict not in VERDICTS or not isinstance(findings, list):
-            raise EvaluationError(f"invalid ground truth for branch {branch}")
-        if not all(isinstance(finding, dict) for finding in findings):
-            raise EvaluationError(f"invalid finding for branch {branch}")
-        branches[branch] = {"verdict": verdict, "findings": findings}
-    return branches
-
-
-def _load_pr_numbers(path: Path) -> dict[str, int]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise EvaluationError("prs.json must contain a list")
-    result: dict[str, int] = {}
-    for pr in payload:
-        if not isinstance(pr, dict):
-            raise EvaluationError("each prs.json entry must be an object")
-        branch = pr.get("headRefName")
-        number = pr.get("number")
-        if not isinstance(branch, str) or not isinstance(number, int):
-            raise EvaluationError("each PR needs string headRefName and integer number")
-        if branch not in result or pr.get("state") == "OPEN":
-            result[branch] = number
-    return result
-
-
-def _load_review(
-    branch: str,
-    pr_numbers: dict[str, int],
-    runs_root: Path,
-) -> tuple[Path | None, dict[str, Any] | None]:
-    number = pr_numbers.get(branch)
-    if number is None:
-        return None, None
-    artifacts_root = runs_root / f"pr-{number}" / "artifacts"
-    reviews: list[tuple[Path, dict[str, Any]]] = []
-    for path in sorted(artifacts_root.rglob("*.json")) if artifacts_root.is_dir() else []:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or "verdict" not in payload or "findings" not in payload:
-            continue
-        verdict = payload["verdict"]
-        findings = payload["findings"]
-        if not isinstance(verdict, str) or not isinstance(findings, list):
-            raise EvaluationError(f"invalid reviewer artifact: {path}")
-        if not all(isinstance(finding, dict) for finding in findings):
-            raise EvaluationError(f"invalid reviewer finding: {path}")
-        reviews.append((path, {"verdict": verdict, "findings": findings}))
-    if not reviews:
-        return None, None
-    if len(reviews) > 1:
-        raise EvaluationError(f"multiple reviewer artifacts for branch {branch}")
-    return reviews[0]
-
-
-def _load_branch_review(
-    branch: str,
-    runs_dir: Path,
-) -> tuple[Path | None, dict[str, Any] | None]:
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-.") or "review"
-    candidates = [runs_dir / f"{branch}.json", runs_dir / f"{safe_name}.json"]
-    artifacts = [path for path in dict.fromkeys(candidates) if path.is_file()]
-    if not artifacts:
-        return None, None
-    if len(artifacts) > 1:
-        raise EvaluationError(f"multiple reviewer artifacts for branch {branch}")
-
-    path = artifacts[0]
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise EvaluationError(f"invalid reviewer artifact: {path}")
-    verdict = payload.get("verdict")
-    findings = payload.get("findings")
-    if not isinstance(verdict, str) or not isinstance(findings, list):
-        raise EvaluationError(f"invalid reviewer artifact: {path}")
-    if not all(isinstance(finding, dict) for finding in findings):
-        raise EvaluationError(f"invalid reviewer finding: {path}")
-    return path, {"verdict": verdict, "findings": findings}
-
-
-def _verdict_class(verdict: str) -> str:
-    if verdict == "BLOCK":
-        return "BLOCK"
-    if verdict in {"APPROVE", "COMMENT"}:
-        return "APPROVE"
-    raise EvaluationError(f"unknown reviewer verdict: {verdict}")
 
 
 def _first_match(expected: dict[str, Any], predicted: list[dict[str, Any]]) -> int | None:
@@ -432,89 +130,272 @@ def _first_match(expected: dict[str, Any], predicted: list[dict[str, Any]]) -> i
     )
 
 
-def _combine_findings(branches: list[BranchResults]) -> FindingResults:
-    return FindingResults(
-        true_positives=[match for row in branches for match in row.finding_results.true_positives],
-        false_positives=[
-            finding for row in branches for finding in row.finding_results.false_positives
-        ],
-        false_negatives=[
-            finding for row in branches for finding in row.finding_results.false_negatives
-        ],
-        unreachable=[finding for row in branches for finding in row.finding_results.unreachable],
-        unreachable_detected=[
-            match for row in branches for match in row.finding_results.unreachable_detected
-        ],
-    )
-
-
-def _confusion(branches: list[BranchResults]) -> dict[tuple[str, str], int]:
-    counts = {
-        (expected, predicted): 0
-        for expected in ("APPROVE", "BLOCK")
-        for predicted in ("APPROVE", "BLOCK", "MISSING")
-    }
-    for row in branches:
-        counts[(row.expected_verdict, row.predicted_verdict or "MISSING")] += 1
-    return counts
-
-
-def _branch_row(row: BranchResults) -> str:
-    predicted = row.predicted_verdict or "MISSING"
-    if row.predicted_verdict is None:
-        verdict_result = "MISSING"
-    elif row.expected_verdict == "BLOCK":
-        verdict_result = "TP" if predicted == "BLOCK" else "FN"
-    else:
-        verdict_result = "TN" if predicted == "APPROVE" else "FP"
-    artifact = str(row.artifact) if row.artifact else "missing"
-    finding_results = row.finding_results
-    cells = (
-        row.branch,
-        row.expected_verdict,
-        predicted,
-        verdict_result,
-        len(finding_results.true_positives),
-        len(finding_results.false_positives),
-        len(finding_results.false_negatives),
-        artifact,
-    )
-    return "| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |"
-
-
-def _append_matches(lines: list[str], matches: list[FindingMatch]) -> None:
-    if not matches:
-        lines.append("- None")
-        return
-    for match in matches:
-        lines.append(
-            f"- `{match.expected.branch}` — expected `{_finding_json(match.expected.finding)}`; "
-            f"predicted `{_finding_json(match.predicted.finding)}`"
-        )
-
-
-def _append_records(lines: list[str], records: list[FindingRecord]) -> None:
-    if not records:
-        lines.append("- None")
-        return
-    for record in records:
-        lines.append(f"- `{record.branch}` — `{_finding_json(record.finding)}`")
-
-
-def _finding_json(finding: dict[str, Any]) -> str:
-    return json.dumps(finding, ensure_ascii=False, separators=(",", ":"))
-
-
-def _markdown_cell(value: object) -> str:
-    return str(value).replace("|", r"\|").replace("\n", "<br>")
-
-
 def _ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def severity_exact_results(strict: FindingResults) -> FindingResults:
+    """Seed B's SCORING-POLICY.md "Severity treatment": a strict match with unequal
+    severity is one FN (expected severity) + one FP (predicted severity), never a
+    hidden TP. Unmatched findings carry over unchanged."""
+    true_positives: list[FindingMatch] = []
+    false_negatives: list[FindingRecord] = list(strict.false_negatives)
+    false_positives: list[FindingRecord] = list(strict.false_positives)
+
+    for match in strict.true_positives:
+        if match.expected.finding.get("severity") == match.predicted.finding.get("severity"):
+            true_positives.append(match)
+        else:
+            false_negatives.append(match.expected)
+            false_positives.append(match.predicted)
+
+    return FindingResults(
+        true_positives=true_positives,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+    )
+
+
+def load_adjudications(path: Path) -> list[dict[str, Any]]:
+    """Load eval/golden/adjudications.yml. Missing file -> no adjudications (the
+    mechanism must work before any entry is ever added)."""
+    if not path.is_file():
+        return []
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    entries = document.get("adjudications", [])
+    if not isinstance(entries, list):
+        raise EvaluationError(f"{path}: 'adjudications' must be a list")
+    return entries
+
+
+def apply_adjudications(
+    branch: str,
+    strict: FindingResults,
+    predicted: list[dict[str, Any]],  # noqa: ARG001
+    adjudications: list[dict[str, Any]],
+) -> FindingResults:
+    """Credit documented mismatches (spec SS5) as matches, without mutating `strict`.
+
+    ``predicted`` is accepted for interface stability (Task 5's evaluate() calls
+    all three readings with the same per-branch argument shape) but not used here:
+    the strict match's own false_positive/false_negative records already carry the
+    finding data needed to locate and re-pair a documented mismatch.
+    """
+    true_positives = list(strict.true_positives)
+    remaining_fn = list(strict.false_negatives)
+    remaining_fp = list(strict.false_positives)
+
+    for entry in adjudications:
+        if entry.get("branch") != branch:
+            continue
+        expected_key = entry["expected"]
+        predicted_key = entry["predicted"]
+
+        fn_index = next(
+            (
+                i
+                for i, record in enumerate(remaining_fn)
+                if record.finding.get("rule_id") == expected_key["rule_id"]
+                and record.finding.get("path") == expected_key["path"]
+            ),
+            None,
+        )
+        fp_index = next(
+            (
+                i
+                for i, record in enumerate(remaining_fp)
+                if record.finding.get("rule_id") == predicted_key["rule_id"]
+                and record.finding.get("path") == predicted_key["path"]
+            ),
+            None,
+        )
+        if fn_index is None or fp_index is None:
+            continue  # the documented mismatch didn't recur in this run -- not an error
+
+        expected_record = remaining_fn.pop(fn_index)
+        predicted_record = remaining_fp.pop(fp_index)
+        true_positives.append(FindingMatch(expected_record, predicted_record))
+
+    return FindingResults(
+        true_positives=true_positives,
+        false_positives=remaining_fp,
+        false_negatives=remaining_fn,
+    )
+
+
+_READING_NAMES = ("strict", "adjudicated", "severity_exact")
+
+
+@dataclass(frozen=True)
+class BranchResult:
+    branch: str
+    expected_verdict: str
+    predicted_verdict: str | None
+    readings: dict[str, FindingResults]
+
+
+@dataclass
+class EgressResults:
+    egress: str
+    branches: list[BranchResult] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    @property
+    def readings(self) -> dict[str, FindingResults]:
+        combined: dict[str, FindingResults] = {name: FindingResults() for name in _READING_NAMES}
+        for branch in self.branches:
+            for name, result in branch.readings.items():
+                combined[name].true_positives.extend(result.true_positives)
+                combined[name].false_positives.extend(result.false_positives)
+                combined[name].false_negatives.extend(result.false_negatives)
+        return combined
+
+    @property
+    def accuracy(self) -> float:
+        correct = sum(
+            b.predicted_verdict is not None and b.predicted_verdict == b.expected_verdict
+            for b in self.branches
+        )
+        return _ratio(correct, len(self.branches))
+
+    @property
+    def block_recall(self) -> float:
+        expected_blocks = [b for b in self.branches if b.expected_verdict == "BLOCK"]
+        true_blocks = sum(b.predicted_verdict == "BLOCK" for b in expected_blocks)
+        return _ratio(true_blocks, len(expected_blocks))
+
+    @property
+    def block_precision(self) -> float:
+        predicted_blocks = [b for b in self.branches if b.predicted_verdict == "BLOCK"]
+        true_blocks = sum(b.expected_verdict == "BLOCK" for b in predicted_blocks)
+        return _ratio(true_blocks, len(predicted_blocks))
+
+
+def evaluate(golden_dir: Path, egress: str, *, require_all: bool = False) -> EgressResults:
+    """Replay each branch's provider_response.<egress>.json through the real pipeline
+    (reviewer.run_review with provider="fake") and score it under all three readings.
+    A branch with no recording for this egress mode is skipped unless require_all.
+
+    A branch whose expected.json carries a secrets-1 finding is always skipped, even
+    under require_all: the secrets firewall fires deterministically before any LLM
+    call for that branch (reviewer.py's run_review, and record.py's own mirrored
+    check), so no recording will ever exist for it -- require_all's "missing" means
+    "missing something that should exist," not "missing something the design says
+    never will."
+    """
+    if egress not in {"raw", "minimized"}:
+        raise EvaluationError(f"unknown egress mode: {egress!r}")
+
+    adjudications = load_adjudications(golden_dir / "adjudications.yml")
+    results = EgressResults(egress=egress)
+
+    for expected_path in sorted(golden_dir.glob("*/*/expected.json")):
+        branch_dir = expected_path.parent
+        branch = json.loads(expected_path.read_text(encoding="utf-8"))
+        recording_path = branch_dir / f"provider_response.{egress}.json"
+        secrets_gated = any(
+            f.get("rule_id") == _DETERMINISTIC_SECRET_RULE_ID for f in branch["findings"]
+        )
+
+        if not recording_path.is_file():
+            if require_all and not secrets_gated:
+                raise EvaluationError(
+                    f"missing provider_response.{egress}.json for {branch['branch']}"
+                )
+            results.skipped.append(branch["branch"])
+            continue
+
+        diff = (branch_dir / "diff.patch").read_text(encoding="utf-8")
+        # run_review always writes a JSON+MD report under out_dir -- golden_dir is a
+        # real, committed directory (eval/golden/), so that report must land in a
+        # scratch location, never alongside the fixtures themselves.
+        with tempfile.TemporaryDirectory() as scratch_dir:
+            outcome = run_review(
+                diff=diff,
+                source_name=branch["branch"].replace("/", "-"),
+                repo_root=branch_dir,
+                config=Config(),
+                out_dir=Path(scratch_dir),
+                provider="fake",
+                fake_response=str(recording_path),
+                egress=egress,
+                as_json=True,
+            )
+        predicted_findings = outcome.json_report["findings"]
+
+        strict = match_findings(branch["branch"], branch["findings"], predicted_findings)
+        readings = {
+            "strict": strict,
+            "adjudicated": apply_adjudications(
+                branch["branch"], strict, predicted_findings, adjudications
+            ),
+            "severity_exact": severity_exact_results(strict),
+        }
+        results.branches.append(
+            BranchResult(
+                branch=branch["branch"],
+                expected_verdict=branch["verdict"],
+                predicted_verdict=outcome.json_report["verdict"],
+                readings=readings,
+            )
+        )
+
+    return results
+
+
+def render_markdown(results: EgressResults) -> str:
+    lines = [
+        f"# Reviewer evaluation -- egress={results.egress}",
+        "",
+        f"- Branches scored: {len(results.branches)}",
+        f"- Branches skipped (no recording yet): {len(results.skipped)}"
+        + (f" ({', '.join(results.skipped)})" if results.skipped else ""),
+        f"- Block recall: {_percent(results.block_recall)}",
+        f"- Block precision: {_percent(results.block_precision)}",
+        f"- Verdict accuracy: {_percent(results.accuracy)}",
+        "",
+    ]
+    for name in _READING_NAMES:
+        reading = results.readings[name]
+        lines.extend(
+            [
+                f"## Findings -- {name}",
+                "",
+                f"- Precision: {_percent(reading.precision)}",
+                f"- Recall: {_percent(reading.recall)}",
+                f"- F1: {_percent(reading.f1)}",
+                f"- TP: {len(reading.true_positives)} / FP: {len(reading.false_positives)} "
+                f"/ FN: {len(reading.false_negatives)}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _percent(value: float) -> str:
     return f"{value:.1%}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--golden-dir", type=Path, default=Path.cwd() / "eval" / "golden")
+    parser.add_argument("--egress", choices=["raw", "minimized"], required=True)
+    parser.add_argument("--require-all", action="store_true")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+
+    try:
+        results = evaluate(args.golden_dir, args.egress, require_all=args.require_all)
+    except EvaluationError as exc:
+        sys.stderr.write(f"evaluation failed: {exc}\n")
+        return 2
+
+    report = render_markdown(results)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(report, encoding="utf-8")
+    sys.stdout.write(report)
+    return 0
 
 
 if __name__ == "__main__":

@@ -196,7 +196,7 @@ def run_review(
                 llm_layer = "skipped:no_provider_key"
 
             validation = validate_findings(
-                raw_review["findings"],
+                _dealias_finding_paths(raw_review["findings"], egress_result.path_aliases),
                 registry=registry,
                 diff=diff,
                 evidence_policy=resolved_evidence_policy,
@@ -324,6 +324,24 @@ def _build_egress(
     return build_minimized_egress(
         diff, title=source_name, description=description, rules_block=rules_block
     )
+
+
+def _dealias_finding_paths(
+    findings: list[dict[str, Any]], path_aliases: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Translate each finding's `path` from an egress-time alias back to the real path
+    it stands for (empty `path_aliases` under raw egress is a no-op). A minimized-mode
+    finding can only cite the alias the model was shown (e.g. `file_0001.py`) -- never
+    the real path, which never appears in the payload sent to the provider -- so
+    validation.py's changed_line_index (built from the real diff) would otherwise never
+    match any minimized-mode finding, regardless of correctness.
+    """
+    if not path_aliases:
+        return findings
+    return [
+        {**finding, "path": path_aliases.get(finding["path"], finding["path"])}
+        for finding in findings
+    ]
 
 
 def _build_provider(name: str, *, config: Config, fake_response: str | None) -> Provider:

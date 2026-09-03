@@ -713,6 +713,58 @@ def test_run_review_egress_minimized_produces_a_minimized_report_block(
     assert "f.py" not in captured["user_content"]
 
 
+def test_run_review_egress_minimized_de_aliases_a_findings_path_before_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model shown a minimized payload can only cite the aliased path it was shown
+    (e.g. file_0001.py, never the real path) -- validation.py checks a finding's
+    location against changed_line_index(diff), which is keyed by the real diff's real
+    paths. Without de-aliasing the response first, every minimized-mode finding is
+    unconditionally rejected as range_not_in_changed_lines, regardless of correctness.
+    """
+    diff = (
+        "diff --git a/app/main.py b/app/main.py\n"
+        "--- a/app/main.py\n+++ b/app/main.py\n@@ -1,1 +1,2 @@\n x\n+y\n"
+    )
+    monkeypatch.setattr(review_module, "findings_for_diff", lambda _diff, _root, **_kw: [])
+    monkeypatch.setattr(review_module, "_gate_commit", lambda _repo_root: "c8ca0e9")
+
+    def spy_call_provider(
+        *,
+        provider_name: str,
+        config: Config,
+        fake_response: str | None,
+        egress_result: Any,
+        prompt_version: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        del provider_name, config, fake_response, prompt_version
+        assert "app/main.py" not in egress_result.user_content  # real path never sent
+        alias = next(iter(egress_result.path_aliases))
+        return {
+            "findings": [
+                finding(rule_id="code-quality-3", confidence="high")
+                | {"path": alias, "line_start": 2, "line_end": 2}
+            ],
+            "summary": "ok",
+        }, {}
+
+    monkeypatch.setattr(review_module, "_call_provider", spy_call_provider)
+
+    outcome = run_review(
+        diff=diff,
+        source_name="f.patch",
+        repo_root=tmp_path,
+        config=Config(egress="minimized"),
+        out_dir=tmp_path / "reports",
+    )
+
+    assert outcome.json_report["filtered_out"] == []
+    assert len(outcome.json_report["findings"]) == 1
+    # the report shows the real path, never the alias -- a human reading it must be
+    # able to find the finding in their own repo.
+    assert outcome.json_report["findings"][0]["path"] == "app/main.py"
+
+
 def test_run_review_scans_context_files_for_secrets_before_transmitting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

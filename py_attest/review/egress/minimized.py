@@ -356,4 +356,5 @@ def build_minimized_egress(
         mode="minimized",
         user_content=user_content,
         report_block={"mode": "minimized", "payload_version": "MINIMIZED_PATCH_V2"},
+        path_aliases=payload.path_aliases,
     )

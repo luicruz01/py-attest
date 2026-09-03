@@ -1,0 +1,36 @@
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..926c1893fd52b15602504749d20c082107e7614f 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
+ from app import store
+ from app.models import ProgressRecord
+ from app.privacy import redact
++from app.support import build_support_context
+ 
+ logger = logging.getLogger("student-progress")
+ logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+@@ -33,6 +34,7 @@ def _get_student(student_id: str):
+ def get_progress(student_id: str):
+     student = _get_student(student_id)
+     records = [r for r in store.PROGRESS if r.student_id == student_id]
++    logger.info("progress lookup %s", build_support_context(student, records))
+     completed = sum(1 for r in records if r.completed)
+     total = len(store.LESSONS)
+     percentage = round(100 * completed / total) if total else 0
+diff --git a/app/support.py b/app/support.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2918d97093a8eae87e975f0601b128ec552601af
+--- /dev/null
++++ b/app/support.py
+@@ -0,0 +1,10 @@
++"""Contexto compacto para que soporte debuguee problemas de progreso sin ir a 3 sistemas."""
++
++
++def build_support_context(student, records):
++    return {
++        "student": f"{student.full_name} <{student.email}>",
++        "birthdate": student.birthdate,
++        "country": student.country,
++        "records": len(records),
++    }

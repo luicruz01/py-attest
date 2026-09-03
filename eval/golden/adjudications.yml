@@ -1,0 +1,20 @@
+# Manual overrides for the `adjudicated` reading (py_attest/eval/metrics.py).
+#
+# Each entry credits one documented, human-reviewed mismatch between a predicted
+# finding and an expected finding as a match, without changing `strict`'s count.
+# This file starts empty: F0.5 ships the mechanism, not pre-loaded entries. Seed A's
+# own two historical adjudications (streaks off-by-one and progress-percentage
+# test-enshrinement, both filed under the wrong section) described mismatches in a run
+# under the *old* prompt/schema and are not ported mechanically — add an entry here
+# only after reviewing a real recording under the new prompt/schema and confirming the
+# same mismatch shape recurs (ADR-004 SS6: never tune the golden set from outcomes,
+# only document what a specific real run actually did).
+#
+# Schema:
+# adjudications:
+#   - branch: feature/streaks
+#     expected: {rule_id: code-quality-6, path: app/streaks.py}
+#     predicted: {rule_id: code-quality-6, path: app/main.py}
+#     reason: "human-reviewed: predicted finding describes the same root cause, filed under a neighboring path"
+
+adjudications: []

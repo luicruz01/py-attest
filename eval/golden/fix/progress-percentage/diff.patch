@@ -1,0 +1,32 @@
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..595291afcc82c3e806025e5d0ed71dfc571ed2cc 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -35,7 +35,7 @@ def get_progress(student_id: str):
+     records = [r for r in store.PROGRESS if r.student_id == student_id]
+     completed = sum(1 for r in records if r.completed)
+     total = len(store.LESSONS)
+-    percentage = round(100 * completed / total) if total else 0
++    percentage = int(100 * completed / total) if total else 100
+     return {
+         "student_id": student.id,
+         "completed": completed,
+diff --git a/tests/test_progress.py b/tests/test_progress.py
+index 25c69d79143a5ca6fd36d0cc1e47ddf736f383b8..2ea1055d36ead95a4b26bf2f21b8fc552be60fa2 100644
+--- a/tests/test_progress.py
++++ b/tests/test_progress.py
+@@ -22,6 +22,14 @@ def test_progress_percentage():
+     assert body["percentage"] == 60
+ 
+ 
++def test_progress_percentage_no_lessons(monkeypatch):
++    from app import store
++
++    monkeypatch.setattr(store, "LESSONS", [])
++    body = client.get("/students/s-003/progress").json()
++    assert body["percentage"] == 100
++
++
+ def test_unknown_student_404():
+     assert client.get("/students/nope/progress").status_code == 404
+ 

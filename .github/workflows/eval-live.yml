@@ -1,0 +1,108 @@
+name: eval-live
+
+'on':
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+concurrency:
+  group: eval-live
+  cancel-in-progress: false
+
+jobs:
+  record-and-score:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        egress: [raw, minimized]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      # py_attest/review/secrets_gate.py shells out to gitleaks; this job holds
+      # OPENAI_API_KEY and must never spend it or transmit a diff on the strength of an
+      # unverified binary. Checksum verified against the published
+      # gitleaks_8.30.1_checksums.txt for this asset (same pin and verification as
+      # ci.yml's "Install gitleaks" step -- this project was previously bitten by a
+      # gitleaks version that silently defeated the firewall, which is exactly why this
+      # verification exists).
+      - name: Install gitleaks
+        run: |
+          curl -sSfLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Record each branch
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          for expected in eval/golden/*/*/expected.json; do
+            branch_dir=$(dirname "$expected")
+            branch=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['branch'])" "$expected")
+            has_secret=$(python3 -c "import json,sys; data = json.load(open(sys.argv[1])); print('yes' if any(f['rule_id'] == 'secrets-1' for f in data['findings']) else 'no')" "$expected")
+            if [ "$has_secret" = "yes" ]; then
+              echo "skipping $branch: secrets-1 fires deterministically, the LLM is never called for this branch"
+              continue
+            fi
+            uv run python -m py_attest.eval.record \
+              --diff "$branch_dir/diff.patch" \
+              --provider openai \
+              --egress "${{ matrix.egress }}" \
+              --out "$branch_dir/provider_response.${{ matrix.egress }}.json" \
+              --branch "$branch" \
+              --force
+          done
+
+      - name: Compute metrics
+        run: |
+          uv run python -m py_attest.eval.metrics \
+            --egress "${{ matrix.egress }}" \
+            --require-all \
+            --output "eval/metrics_${{ matrix.egress }}.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-${{ matrix.egress }}
+          path: |
+            eval/golden/*/*/provider_response.${{ matrix.egress }}.json
+            eval/metrics_${{ matrix.egress }}.md
+
+  open-pr:
+    permissions:
+      contents: write
+      pull-requests: write
+    needs: record-and-score
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eval-live-*
+          path: eval/
+          merge-multiple: true
+      - name: Open a PR with the updated recordings
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "eval: weekly live recording refresh"
+          title: "eval: weekly live recording refresh"
+          body: |
+            Automated weekly run of `.github/workflows/eval-live.yml`. A human must
+            review the updated `eval/metrics_*.md` tables and, if they're accepted,
+            manually update `EVAL.md`'s sealed baseline (ADR-004 §6 -- sealing a new
+            baseline is a human decision, this workflow only proposes the data).
+          branch: eval-live-refresh
+          add-paths: |
+            eval/golden/*/*/provider_response.*.json
+            eval/metrics_*.md

@@ -1,0 +1,47 @@
+diff --git a/app/archive.py b/app/archive.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2f9ba23cf19e82ba060580ff9837fb8bf13c42f
+--- /dev/null
++++ b/app/archive.py
+@@ -0,0 +1,22 @@
++"""Archivo para cohort analytics.
++
++Copiamos cada registro de progreso junto con los atributos del estudiante para
++que el equipo de analytics pueda cortar cohortes sin hacer joins. Se conserva
++indefinidamente para poder comparar year-over-year.
++"""
++
++ARCHIVE: list[dict] = []
++
++
++def archive_progress(student, record) -> None:
++    ARCHIVE.append(
++        {
++            "student_id": student.id,
++            "full_name": student.full_name,
++            "birthdate": student.birthdate,
++            "country": student.country,
++            "is_minor": student.is_minor,
++            "lesson_id": record.lesson_id,
++            "score": record.score,
++        }
++    )
+diff --git a/app/main.py b/app/main.py
+index 8b0439edc88776803588304bed587418fac47e23..448b78fd18329643ab6d1d79443bc32cdaf7b039 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -3,6 +3,7 @@ import logging
+ from fastapi import FastAPI, HTTPException
+ 
+ from app import store
++from app.archive import archive_progress
+ from app.models import ProgressRecord
+ from app.privacy import redact
+ 
+@@ -54,5 +55,6 @@ def record_progress(student_id: str, payload: dict):
+         score=int(payload.get("score", 0)),
+     )
+     store.PROGRESS.append(record)
++    archive_progress(student, record)
+     logger.info("progress recorded %s", redact({"student_id": student.id, "lesson_id": record.lesson_id}))
+     return {"ok": True}
